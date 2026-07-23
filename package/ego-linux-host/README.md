@@ -24,6 +24,25 @@ npm run typecheck
 npm test          # build + typecheck + node --test dist/**/*.test.js
 ```
 
+Default `npm test` is Chrome-free. Opt-in E2E (example.com title + snapshot) is gated on `EGO_LINUX_E2E=1`.
+
+### End-to-end smoke
+
+Full smoke needs:
+
+1. Built helper harness: `cd package/ego-browser && npm ci && npm run build` (produces `dist/src/run.js`)
+2. Chrome/Chromium on `PATH`, or `EGO_CHROME_PATH`
+3. A display (`DISPLAY` set) for headed mode, or `EGO_HEADLESS=1`
+
+```bash
+# from package/ego-linux-host
+./scripts/smoke.sh
+# or
+EGO_LINUX_E2E=1 npm test
+```
+
+Without Chrome + display, skip the smoke script; unit/integration tests still pass.
+
 ## Path defaults
 
 | Helper | Env override | Default |
