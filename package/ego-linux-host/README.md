@@ -10,6 +10,8 @@ This is **not** the Citro/macOS ego app. It is an OSS-friendly host that approxi
 
 MVP host: daemon, CDP bridge, Task Spaces, CLI shim, doctor diagnostics, stale-socket recovery, and Chrome respawn on next ensure.
 
+**MVP acceptance (2026-07-23):** manual checklist PASS on Linux headed Chrome — `ego-browser` on PATH, `--doctor` healthy, example.com smoke (title + snapshot), user-tab isolation, two-space disjoint tabs, space reuse by name, handoff → `EGO_TASK_SPACE_USER_IN_CONTROL` → `takeOver` recovery, `package/ego-browser` and `package/ego-linux-host` unit tests green. Details: `.superpowers/sdd/task-11-report.md`.
+
 ## Requirements
 
 - Linux (or WSL with Linux-side Chrome/Chromium)
