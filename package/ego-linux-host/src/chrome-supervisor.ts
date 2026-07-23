@@ -6,7 +6,7 @@ import type { HostConfig } from "./config.js";
 import { makeEgoError } from "./errors.js";
 
 /** Ordered bare names and absolute fallbacks for Chrome/Chromium. */
-const CHROME_CANDIDATES = [
+export const DEFAULT_CHROME_CANDIDATES = [
   "google-chrome-stable",
   "google-chrome",
   "chromium",
@@ -14,6 +14,16 @@ const CHROME_CANDIDATES = [
   "/usr/bin/google-chrome",
   "/usr/bin/chromium",
 ] as const;
+
+export type ResolveChromePathOptions = {
+  /** Override candidate list (default: DEFAULT_CHROME_CANDIDATES). Empty isolates host binaries in tests. */
+  candidates?: readonly string[];
+};
+
+export type EnsureChromeOptions = {
+  /** Passed through to resolveChromePath for test isolation. */
+  candidates?: readonly string[];
+};
 
 const CDP_READY_TIMEOUT_MS = 15_000;
 const CDP_POLL_MS = 100;
@@ -53,10 +63,12 @@ function resolveCandidate(
 /**
  * Resolve a Chrome/Chromium binary path.
  * Order: explicit → EGO_CHROME_PATH → well-known candidates on PATH / absolute paths.
+ * Pass `options.candidates` (e.g. `[]`) to isolate tests from host-installed binaries.
  */
 export function resolveChromePath(
   env: NodeJS.ProcessEnv = process.env,
   explicit?: string | null,
+  options?: ResolveChromePathOptions,
 ): string | null {
   if (explicit) {
     const hit = resolveCandidate(explicit, env);
@@ -67,7 +79,8 @@ export function resolveChromePath(
     const hit = resolveCandidate(fromEnv, env);
     if (hit) return hit;
   }
-  for (const candidate of CHROME_CANDIDATES) {
+  const candidates = options?.candidates ?? DEFAULT_CHROME_CANDIDATES;
+  for (const candidate of candidates) {
     const hit = resolveCandidate(candidate, env);
     if (hit) return hit;
   }
@@ -151,14 +164,20 @@ function makeHandle(
 /**
  * Attach to an existing CDP endpoint or launch Chrome with the host profile.
  * Headed by default; throws if headed and no DISPLAY/WAYLAND_DISPLAY.
+ * `options.candidates` is for tests only (isolates host Chrome binaries).
  */
-export async function ensureChrome(config: HostConfig): Promise<ChromeHandle> {
+export async function ensureChrome(
+  config: HostConfig,
+  options?: EnsureChromeOptions,
+): Promise<ChromeHandle> {
   if (await isCdpUp(config.cdpPort)) {
     // Attached mode: we did not spawn; pid unknown (0). kill is best-effort no-op on 0.
     return makeHandle(0, config.cdpPort, config.userDataDir);
   }
 
-  const chromePath = resolveChromePath(process.env, config.chromePath);
+  const chromePath = resolveChromePath(process.env, config.chromePath, {
+    candidates: options?.candidates,
+  });
   if (!chromePath) {
     throw makeEgoError(
       "EGO_BROWSER_UNAVAILABLE",

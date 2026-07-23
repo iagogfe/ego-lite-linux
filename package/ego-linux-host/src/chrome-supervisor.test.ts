@@ -57,6 +57,7 @@ test("resolveChromePath prefers explicit over env", async () => {
 });
 
 test("resolveChromePath returns null when nothing executable", () => {
+  // Empty candidates: do not probe host absolute paths (/usr/bin/google-chrome, etc.).
   assert.equal(
     resolveChromePath(
       {
@@ -64,6 +65,7 @@ test("resolveChromePath returns null when nothing executable", () => {
         PATH: "/nonexistent/empty-path-dir",
       },
       "/also/missing/chrome",
+      { candidates: [] },
     ),
     null,
   );
@@ -142,6 +144,8 @@ test("ensureChrome throws EGO_BROWSER_UNAVAILABLE when chrome missing", async ()
             cdpPort: 1,
             headless: true,
           }),
+          // Empty candidates: isolate from host /usr/bin/google-chrome etc.
+          { candidates: [] },
         ),
       (err: unknown) => {
         assert.ok(err instanceof Error);
@@ -177,6 +181,10 @@ test("ensureChrome throws when headed without display", async () => {
         ),
       (err: unknown) => {
         assert.ok(err instanceof Error);
+        assert.equal(
+          (err as Error & { error_code?: string }).error_code,
+          "EGO_BROWSER_UNAVAILABLE",
+        );
         assert.match(err.message, /display|DISPLAY|WAYLAND|headed/i);
         return true;
       },
