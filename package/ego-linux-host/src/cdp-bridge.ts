@@ -20,6 +20,11 @@ export type CdpBridge = {
   send(method: string, params?: object, sessionId?: string): Promise<any>;
   sendRaw(payload: object): void;
   onEvent(handler: (msg: any) => void): () => void;
+  /**
+   * Every successfully parsed incoming CDP message (responses + events).
+   * Used by the daemon to forward raw messages to CLI `onCDPMessage`.
+   */
+  onMessage?(handler: (msg: any) => void): () => void;
   close(): Promise<void>;
   listPageTargets(): Promise<CdpPageTarget[]>;
   createTarget(url: string): Promise<string>;
@@ -40,6 +45,8 @@ export type CdpSession = {
   send(method: string, params?: object, sessionId?: string): Promise<any>;
   sendRaw(payload: object): void;
   onEvent(handler: (msg: any) => void): () => void;
+  /** All parsed incoming messages (id responses and events). */
+  onMessage(handler: (msg: any) => void): () => void;
   handleIncoming(text: string): void;
   /** Reject all pending requests (e.g. on close / transport drop). */
   dispose(reason?: Error): void;
@@ -64,6 +71,7 @@ export function createCdpSession(
   let nextId = 1;
   const pending = new Map<number, Pending>();
   const eventHandlers = new Set<(msg: any) => void>();
+  const messageHandlers = new Set<(msg: any) => void>();
   let disposed = false;
 
   function handleIncoming(text: string): void {
@@ -72,6 +80,14 @@ export function createCdpSession(
       msg = JSON.parse(text);
     } catch {
       return;
+    }
+
+    for (const handler of messageHandlers) {
+      try {
+        handler(msg);
+      } catch {
+        // Listener errors must not break the session
+      }
     }
 
     if (msg && msg.id != null && pending.has(msg.id)) {
@@ -179,6 +195,13 @@ export function createCdpSession(
     };
   }
 
+  function onMessage(handler: (msg: any) => void): () => void {
+    messageHandlers.add(handler);
+    return () => {
+      messageHandlers.delete(handler);
+    };
+  }
+
   function dispose(reason?: Error): void {
     if (disposed) return;
     disposed = true;
@@ -191,9 +214,10 @@ export function createCdpSession(
     }
     pending.clear();
     eventHandlers.clear();
+    messageHandlers.clear();
   }
 
-  return { send, sendRaw, onEvent, handleIncoming, dispose };
+  return { send, sendRaw, onEvent, onMessage, handleIncoming, dispose };
 }
 
 export type CdpBridgeOptions = CdpSessionOptions & {
@@ -221,6 +245,7 @@ function wrapSessionAsBridge(
       session.send(method, params, sessionId),
     sendRaw: (payload) => session.sendRaw(payload),
     onEvent: (handler) => session.onEvent(handler),
+    onMessage: (handler) => session.onMessage(handler),
     async close() {
       session.dispose(
         makeEgoError("EGO_CDP_CHANNEL_UNAVAILABLE", "CDP bridge closed"),
