@@ -12,8 +12,38 @@ Scaffold only (Task 0): package layout, TypeScript build, and path defaults. Dae
 
 ## Requirements
 
+- Linux (or WSL with Linux-side Chrome/Chromium)
 - Node.js ≥ 22
 - ESM only
+- Chrome/Chromium for a live browser (not required for unit tests)
+
+## Install (recommended)
+
+From the monorepo root, use the skill installer (builds harness + host, symlinks `ego-browser` into `~/.local/bin`, creates data dirs, detects Chrome, runs `--doctor`):
+
+```bash
+bash skills/ego-browser/scripts/install-linux.sh
+```
+
+Notes:
+
+- This is the **ego-shaped Linux host**, not the Citro/macOS ego lite DMG. Do not run `skills/ego-browser/scripts/install.sh` on Linux.
+- Ensure `~/.local/bin` is on your `PATH` (`export PATH="$HOME/.local/bin:$PATH"`).
+- Headed: prefer WSLg / native display (`DISPLAY` set). Headless: `export EGO_HEADLESS=1`.
+- Non-standard Chrome: `export EGO_CHROME_PATH=/path/to/chrome`.
+
+Details and troubleshooting: [`skills/ego-browser/references/install.md`](../../skills/ego-browser/references/install.md) (section **Install steps (Linux / WSL)**).
+
+Manual alternative (same outcome as the installer steps):
+
+```bash
+cd package/ego-browser && npm ci && npm run build
+cd ../ego-linux-host && npm ci && npm run build
+mkdir -p ~/.local/bin ~/.local/share/ego-lite
+ln -sfn "$(pwd)/bin/ego-browser.mjs" ~/.local/bin/ego-browser
+export PATH="$HOME/.local/bin:$PATH"
+ego-browser --doctor
+```
 
 ## Build and test
 
