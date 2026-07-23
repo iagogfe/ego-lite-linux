@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -16,6 +17,8 @@ import {
   resolveHarnessPath,
   parseCliFlags,
   CLI_HELP,
+  unlinkStaleSocket,
+  ensureHost,
 } from "./cli.js";
 
 function mockConn(handler?: {
@@ -258,6 +261,66 @@ test("connectHost ping + installEgoClient against daemon", async () => {
     } finally {
       await daemon.close();
     }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("unlinkStaleSocket removes leftover socket file", async () => {
+  const dir = join(
+    tmpdir(),
+    `ego-stale-sock-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+  );
+  await mkdir(dir, { recursive: true });
+  const sockPath = join(dir, "host.sock");
+  try {
+    // Leftover path after a dead daemon (plain file is enough for recovery).
+    await writeFile(sockPath, "");
+    assert.equal(existsSync(sockPath), true);
+    assert.equal(await pingSocket(sockPath), false);
+
+    assert.equal(await unlinkStaleSocket(sockPath), true);
+    assert.equal(existsSync(sockPath), false);
+    assert.equal(await unlinkStaleSocket(sockPath), false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("ensureHost unlinks stale socket before failing on missing daemon", async () => {
+  const dir = join(
+    tmpdir(),
+    `ego-ensure-stale-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+  );
+  await mkdir(dir, { recursive: true });
+  const sockPath = join(dir, "host.sock");
+  try {
+    await writeFile(sockPath, "");
+    assert.equal(existsSync(sockPath), true);
+
+    const config: HostConfig = {
+      chromePath: null,
+      userDataDir: join(dir, "profile"),
+      cdpPort: 19224,
+      headless: true,
+      hostSocket: sockPath,
+      dataDir: dir,
+      seedFromChrome: false,
+    };
+
+    await assert.rejects(
+      () =>
+        ensureHost(config, {
+          packageRoot: join(dir, "no-such-package"),
+          timeoutMs: 200,
+        }),
+      /daemon entry not found/,
+    );
+    assert.equal(
+      existsSync(sockPath),
+      false,
+      "stale socket should be unlinked before spawn attempt",
+    );
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

@@ -6,7 +6,7 @@
 
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { open, mkdir } from "node:fs/promises";
+import { open, mkdir, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { loadConfig, type HostConfig } from "./config.js";
@@ -125,7 +125,25 @@ export function defaultAgentWorkspace(packageRoot: string = PACKAGE_ROOT): strin
 }
 
 /**
+ * Unlink a leftover host socket file when the daemon is not answering.
+ * Safe if the path is already gone (ENOENT).
+ */
+export async function unlinkStaleSocket(socketPath: string): Promise<boolean> {
+  if (!existsSync(socketPath)) return false;
+  try {
+    await unlink(socketPath);
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === "ENOENT") return false;
+    // Best-effort: daemon start also unlinks before listen.
+    return false;
+  }
+}
+
+/**
  * Ensure host daemon is listening on config.hostSocket.
+ * If the socket file exists but ping fails, unlinks the stale sock and restarts.
  * Spawns bin/ego-linux-hostd.mjs detached if needed; polls ping up to 15s.
  */
 export async function ensureHost(
@@ -139,6 +157,9 @@ export async function ensureHost(
 ): Promise<void> {
   const env = options.env ?? process.env;
   if (await pingSocket(config.hostSocket)) return;
+
+  // Stale socket recovery: file exists but daemon is not answering → unlink + restart.
+  await unlinkStaleSocket(config.hostSocket);
 
   const packageRoot = options.packageRoot ?? PACKAGE_ROOT;
   const daemonScript = join(packageRoot, "bin", "ego-linux-hostd.mjs");
@@ -227,10 +248,19 @@ export async function runCli(
 
   if (flags.doctor) {
     await ensure(config, { env, packageRoot });
+    let harnessPath: string | null = null;
+    try {
+      harnessPath = resolveHarnessPath(env, packageRoot, opts.harnessPath);
+    } catch {
+      harnessPath = null;
+    }
     const conn = await connectHost(config.hostSocket);
     try {
-      const doctor = await conn.request("doctor");
-      writeStream(stdout, JSON.stringify(doctor, null, 2) + "\n");
+      const doctor = (await conn.request("doctor")) as Record<string, unknown>;
+      writeStream(
+        stdout,
+        JSON.stringify({ ...doctor, harnessPath }, null, 2) + "\n",
+      );
       return 0;
     } finally {
       conn.close();

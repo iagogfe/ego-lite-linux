@@ -197,6 +197,57 @@ export async function startDaemon(
     detachForward = runtime.attachCdpForwarding();
   }
 
+  /**
+   * If Chrome/CDP died, respawn via ensureChrome and reconnect the bridge.
+   * Ego methods call this so a dead browser surfaces as a clear
+   * EGO_BROWSER_UNAVAILABLE (or recovers when spawn succeeds).
+   */
+  async function ensureBrowserReady(): Promise<void> {
+    if (options.skipChrome) return;
+
+    if (cdp && (await isCdpUp(config.cdpPort))) {
+      return;
+    }
+
+    if (detachForward) {
+      detachForward();
+      detachForward = undefined;
+    }
+    if (cdp) {
+      try {
+        await cdp.close();
+      } catch {
+        // ignore
+      }
+      cdp = null;
+    }
+
+    try {
+      // ensureChrome attaches if CDP is already back, otherwise respawns Chrome.
+      chrome = await ensureChromeFn(config);
+      cdp = await connectCdpFn(config.cdpPort);
+      detachForward = runtime.attachCdpForwarding();
+    } catch (err) {
+      const code =
+        err &&
+        typeof err === "object" &&
+        typeof (err as { error_code?: string }).error_code === "string"
+          ? (err as { error_code: string }).error_code
+          : undefined;
+      if (code === "EGO_BROWSER_UNAVAILABLE") throw err;
+      const message =
+        err instanceof Error
+          ? err.message
+          : typeof err === "string"
+            ? err
+            : String(err);
+      throw makeEgoError(
+        "EGO_BROWSER_UNAVAILABLE",
+        `Browser/CDP unavailable: ${message}. Chrome may have exited; the host will try to respawn on the next request.`,
+      );
+    }
+  }
+
   const clients = new Set<Socket>();
 
   async function handleRequest(
@@ -210,7 +261,7 @@ export async function startDaemon(
       return buildDoctor(config, chrome, spaceManager, socketPath);
     }
     if (method === "reload") {
-      // Drop CDP and reconnect; keep Chrome process
+      // Drop CDP and reconnect; respawn Chrome if CDP is down.
       if (detachForward) {
         detachForward();
         detachForward = undefined;
@@ -224,15 +275,36 @@ export async function startDaemon(
         cdp = null;
       }
       if (!options.skipChrome) {
-        if (!(await isCdpUp(config.cdpPort))) {
-          chrome = await ensureChromeFn(config);
+        try {
+          if (!(await isCdpUp(config.cdpPort))) {
+            chrome = await ensureChromeFn(config);
+          }
+          cdp = await connectCdpFn(config.cdpPort);
+          detachForward = runtime.attachCdpForwarding();
+        } catch (err) {
+          const code =
+            err &&
+            typeof err === "object" &&
+            typeof (err as { error_code?: string }).error_code === "string"
+              ? (err as { error_code: string }).error_code
+              : undefined;
+          if (code === "EGO_BROWSER_UNAVAILABLE") throw err;
+          const message =
+            err instanceof Error
+              ? err.message
+              : typeof err === "string"
+                ? err
+                : String(err);
+          throw makeEgoError(
+            "EGO_BROWSER_UNAVAILABLE",
+            `Browser/CDP unavailable after reload: ${message}`,
+          );
         }
-        cdp = await connectCdpFn(config.cdpPort);
-        detachForward = runtime.attachCdpForwarding();
       }
       return { ok: true };
     }
     if (method.startsWith("ego.")) {
+      await ensureBrowserReady();
       const result = await runtime.handle(method, params ?? {});
       // Persist space mutations (best-effort)
       try {
@@ -365,6 +437,20 @@ export async function startDaemon(
   };
 }
 
+function isProcessAlive(pid: number): boolean {
+  if (!pid || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Diagnostic payload for RPC `doctor` / CLI `--doctor`.
+ * CLI merges `harnessPath` (resolved on the client) into this object.
+ */
 async function buildDoctor(
   config: HostConfig,
   chrome: ChromeHandle | null,
@@ -372,13 +458,16 @@ async function buildDoctor(
   socketPath: string,
 ): Promise<Record<string, unknown>> {
   const cdpUp = await isCdpUp(config.cdpPort);
+  const chromePid = chrome?.pid ?? null;
+  const chromeRunning =
+    cdpUp || (chromePid != null && isProcessAlive(chromePid));
   const selected = spaceManager.selected();
   return {
     ok: true,
     version: HOST_VERSION,
     chromePath: config.chromePath,
-    chromeRunning: chrome != null && (chrome.pid > 0 || cdpUp),
-    chromePid: chrome?.pid ?? null,
+    chromeRunning,
+    chromePid,
     cdpPort: config.cdpPort,
     cdpUp,
     profileDir: config.userDataDir,
@@ -395,5 +484,7 @@ async function buildDoctor(
       : null,
     headless: config.headless,
     displayEnv: Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY),
+    // Resolved by the CLI shim (daemon does not know the harness layout).
+    harnessPath: null,
   };
 }

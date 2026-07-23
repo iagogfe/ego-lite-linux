@@ -50,6 +50,16 @@ bash skills/ego-browser/scripts/install-linux.sh --no-doctor
 bash skills/ego-browser/scripts/install-linux.sh --doctor   # default
 ```
 
+### Optional profile seed (`--seed-chrome`) — risky, off by default
+
+Copying cookies/logins from your **system Chrome** into the ego profile is **not** done by default and is not wired into the installer yet.
+
+- Config flag `seedFromChrome` in `~/.config/ego-lite/config.json` defaults to `false` (feature flag only).
+- A future installer `--seed-chrome` would copy only selected Default-profile dirs **when the source Chrome is fully closed**.
+- Seeding while Chrome is running (or blindly copying a live profile) can **corrupt Chrome data**. Leave seeding disabled unless you understand that risk.
+
+Until an explicit, guarded implementation lands, use Chrome’s own export/import or sign in again inside the ego profile.
+
 ### Headed vs headless (WSL notes)
 
 | Mode | When | How |

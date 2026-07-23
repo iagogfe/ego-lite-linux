@@ -164,6 +164,9 @@ function makeHandle(
 /**
  * Attach to an existing CDP endpoint or launch Chrome with the host profile.
  * Headed by default; throws if headed and no DISPLAY/WAYLAND_DISPLAY.
+ * When CDP is down (Chrome died or never started), spawns a new process —
+ * call again after death to respawn. Throws EGO_BROWSER_UNAVAILABLE with
+ * clear text on missing binary, no display, spawn failure, or CDP timeout.
  * `options.candidates` is for tests only (isolates host Chrome binaries).
  */
 export async function ensureChrome(

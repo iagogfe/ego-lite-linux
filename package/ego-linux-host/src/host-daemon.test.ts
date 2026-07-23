@@ -104,17 +104,33 @@ test("daemon listens and answers ping without Chrome", async () => {
 
 test("daemon doctor and ego.listTaskSpaces without Chrome", async () => {
   await withTempDir(async (dir) => {
+    const config = testConfig(dir);
     const daemon = await startDaemon({
-      config: testConfig(dir),
+      config,
       skipChrome: true,
     });
     try {
       const doctor = await rpcCall(daemon.socketPath, "doctor");
       assert.equal(doctor.ok, true);
       assert.equal(doctor.version, HOST_VERSION);
-      assert.equal(doctor.socketPath, daemon.socketPath);
+      assert.equal(doctor.chromePath, config.chromePath);
+      assert.equal(typeof doctor.chromeRunning, "boolean");
+      assert.equal(doctor.cdpPort, config.cdpPort);
       assert.equal(doctor.cdpUp, false);
+      assert.equal(doctor.profileDir, config.userDataDir);
+      assert.equal(doctor.socketPath, daemon.socketPath);
+      assert.equal(typeof doctor.daemonPid, "number");
+      assert.ok(doctor.daemonPid > 0);
       assert.ok(doctor.spaceCount >= 1);
+      assert.ok(
+        doctor.selectedSpace === null ||
+          (typeof doctor.selectedSpace === "object" &&
+            doctor.selectedSpace !== null),
+      );
+      assert.equal(doctor.headless, config.headless);
+      assert.equal(typeof doctor.displayEnv, "boolean");
+      // Daemon leaves harnessPath null; CLI merges the resolved path.
+      assert.equal(doctor.harnessPath, null);
 
       const spaces = await rpcCall(daemon.socketPath, "ego.listTaskSpaces");
       assert.ok(Array.isArray(spaces.taskSpaces));
@@ -141,6 +157,130 @@ test("daemon rejects unknown methods", async () => {
       await assert.rejects(
         () => rpcCall(daemon.socketPath, "nope.method"),
         (err: any) => err.error_code === "EGO_INVALID_ARGUMENT",
+      );
+    } finally {
+      await daemon.close();
+    }
+  });
+});
+
+test("daemon respawns Chrome via ensureChrome when CDP is down on ego method", async () => {
+  await withTempDir(async (dir) => {
+    let ensureCount = 0;
+    const pages = [
+      {
+        targetId: "t1",
+        title: "blank",
+        url: "about:blank",
+        type: "page",
+      },
+    ];
+    const config = testConfig(dir);
+    // Port with nothing listening → isCdpUp false → ensureBrowserReady re-calls ensureChrome.
+    config.cdpPort = 1;
+
+    const daemon = await startDaemon({
+      config,
+      ensureChrome: async () => {
+        ensureCount++;
+        return {
+          pid: 42,
+          cdpPort: config.cdpPort,
+          userDataDir: config.userDataDir,
+          async kill() {},
+        };
+      },
+      connectCdp: async () => ({
+        async send() {
+          return {};
+        },
+        sendRaw() {},
+        onEvent() {
+          return () => {};
+        },
+        onMessage() {
+          return () => {};
+        },
+        async close() {},
+        async listPageTargets() {
+          return pages;
+        },
+        async createTarget(url: string) {
+          return `new-${url}`;
+        },
+        async attach() {
+          return "session-1";
+        },
+      }),
+    });
+    try {
+      assert.equal(ensureCount, 1, "start ensures Chrome once");
+      const tabs = await rpcCall(daemon.socketPath, "ego.listTabs");
+      assert.ok(Array.isArray(tabs.tabs));
+      assert.ok(
+        ensureCount >= 2,
+        `expected respawn ensureChrome after CDP down, got ${ensureCount}`,
+      );
+    } finally {
+      await daemon.close();
+    }
+  });
+});
+
+test("daemon throws EGO_BROWSER_UNAVAILABLE when ensureChrome fails on ego method", async () => {
+  await withTempDir(async (dir) => {
+    let ensureCount = 0;
+    const config = testConfig(dir);
+    config.cdpPort = 1;
+
+    const daemon = await startDaemon({
+      config,
+      ensureChrome: async () => {
+        ensureCount++;
+        if (ensureCount === 1) {
+          return {
+            pid: 0,
+            cdpPort: config.cdpPort,
+            userDataDir: config.userDataDir,
+            async kill() {},
+          };
+        }
+        const err = Object.assign(new Error("Chrome binary not found"), {
+          error_code: "EGO_BROWSER_UNAVAILABLE",
+        });
+        throw err;
+      },
+      connectCdp: async () => ({
+        async send() {
+          return {};
+        },
+        sendRaw() {},
+        onEvent() {
+          return () => {};
+        },
+        onMessage() {
+          return () => {};
+        },
+        async close() {},
+        async listPageTargets() {
+          return [];
+        },
+        async createTarget() {
+          return "t";
+        },
+        async attach() {
+          return "s";
+        },
+      }),
+    });
+    try {
+      await assert.rejects(
+        () => rpcCall(daemon.socketPath, "ego.listTabs"),
+        (err: any) => {
+          assert.equal(err.error_code, "EGO_BROWSER_UNAVAILABLE");
+          assert.match(String(err.message), /Chrome|unavailable|binary/i);
+          return true;
+        },
       );
     } finally {
       await daemon.close();

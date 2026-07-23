@@ -8,7 +8,7 @@ This is **not** the Citro/macOS ego app. It is an OSS-friendly host that approxi
 
 ## Status
 
-Scaffold only (Task 0): package layout, TypeScript build, and path defaults. Daemon, CDP bridge, spaces, and CLI land in later tasks.
+MVP host: daemon, CDP bridge, Task Spaces, CLI shim, doctor diagnostics, stale-socket recovery, and Chrome respawn on next ensure.
 
 ## Requirements
 
@@ -31,6 +31,7 @@ Notes:
 - Ensure `~/.local/bin` is on your `PATH` (`export PATH="$HOME/.local/bin:$PATH"`).
 - Headed: prefer WSLg / native display (`DISPLAY` set). Headless: `export EGO_HEADLESS=1`.
 - Non-standard Chrome: `export EGO_CHROME_PATH=/path/to/chrome`.
+- **Profile seed** (`seedFromChrome` / future `--seed-chrome`): off by default and **risky** (can corrupt a live Chrome profile). See install docs; do not enable unless Chrome is closed and you accept the risk.
 
 Details and troubleshooting: [`skills/ego-browser/references/install.md`](../../skills/ego-browser/references/install.md) (section **Install steps (Linux / WSL)**).
 
@@ -83,6 +84,15 @@ Without Chrome + display, skip the smoke script; unit/integration tests still pa
 | `defaultSocketPath()` | `EGO_HOST_SOCK` | `<dataDir>/host.sock` |
 | `defaultCdpPort()` | `EGO_CDP_PORT` | `9222` |
 
+## Diagnostics (`ego-browser --doctor`)
+
+Reports (among others): `chromePath`, `chromeRunning`, `cdpPort`, `cdpUp`, `profileDir`, `socketPath`, `daemonPid`, `spaceCount`, `selectedSpace`, `headless`, `displayEnv`, `harnessPath`.
+
+Hardening behavior:
+
+- **Stale socket**: if `host.sock` exists but ping fails, the CLI unlinks it and restarts the daemon.
+- **Chrome death**: the next ego RPC that needs the browser re-runs `ensureChrome` (attach if CDP is back, otherwise respawn). Failures surface as `EGO_BROWSER_UNAVAILABLE` with clear text.
+
 ## Source layout
 
 ```text
@@ -90,9 +100,11 @@ package/ego-linux-host/
   package.json
   tsconfig.json
   scripts/build.mjs
+  bin/
+    ego-browser.mjs
+    ego-linux-hostd.mjs
   src/
-    paths.ts
-    paths.test.ts
+    *.ts
   dist/                 # build output (gitignored)
 ```
 
