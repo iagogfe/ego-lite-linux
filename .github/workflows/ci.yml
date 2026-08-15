@@ -1,148 +1,93 @@
+# Build, typecheck e testes dos dois pacotes.
+#
+# Actions de terceiros pinadas por SHA completo — tag e mutavel, e foi o vetor
+# dos ataques tj-actions (mar/2025) e trivy-action (mar/2026). O Dependabot
+# atualiza os SHAs e o comentario da versao junto.
+#
+# Sem job de release: os pacotes deste repositorio nao sao publicados. Release
+# do ego-browser sai do upstream citrolabs/ego-lite.
+
 name: CI
 
 on:
   push:
-    branches:
-      - dev
-      - main
-    tags:
-      - "v*.*.*"
+    branches: [main]
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
-  test:
+  ego-browser:
+    name: ego-browser (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '24']
     defaults:
       run:
         working-directory: package/ego-browser
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2
         with:
-          node-version: 22
+          egress-policy: audit
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: ${{ matrix.node }}
           cache: npm
           cache-dependency-path: package/ego-browser/package-lock.json
+
       - run: npm ci
       - run: npm test
-      - run: npm run validate:site-skills
+      - name: Validar site skills
+        run: npm run validate:site-skills
 
-  release:
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: test
+  ego-linux-host:
+    name: ego-linux-host (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        # `engines` exige >= 22; Node 20 sairia do suporte antes deste MVP
+        # amadurecer, e testar nele dava um verde que nao valia nada.
+        node: ['22', '24']
     defaults:
       run:
-        shell: bash
-        working-directory: package/ego-browser
+        working-directory: package/ego-linux-host
     steps:
-      - uses: actions/checkout@v4
+      - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2
         with:
-          fetch-depth: 0
-      - uses: actions/setup-node@v4
+          egress-policy: audit
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          node-version: 22
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: ${{ matrix.node }}
           cache: npm
-          cache-dependency-path: package/ego-browser/package-lock.json
+          cache-dependency-path: package/ego-linux-host/package-lock.json
+
       - run: npm ci
-      - run: npm run build
-      - name: Resolve release channel
-        id: release
+      # build + typecheck + node --test. O e2e com Chrome fica de fora: e
+      # gated em EGO_LINUX_E2E=1 e precisa de navegador e display.
+      - run: npm test
+
+      - name: Conferir os artefatos de build
+        # O binario `ego-browser` do host aponta para dist/; um build que gera
+        # menos que isto quebraria a instalacao sem quebrar o build.
         run: |
-          ref_name="${GITHUB_REF_NAME}"
-          supported="true"
-          previous_tag=""
-
-          if [[ "$ref_name" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]]; then
-            release_tag="$ref_name"
-            version_tag="$ref_name"
-            title="Beta $ref_name"
-            prerelease="true"
-            latest="false"
-            previous_tag="$(git tag --merged HEAD --sort=-creatordate --list 'v*.*.*-beta.*' | grep -v "^$release_tag$" | head -1 || true)"
-          elif [[ "$ref_name" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            release_tag="$ref_name"
-            version_tag="$ref_name"
-            title="ego lite $ref_name"
-            prerelease="false"
-            latest="true"
-            previous_tag="$(git tag --merged HEAD --sort=-creatordate --list 'v*.*.*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -v "^$release_tag$" | head -1 || true)"
-          else
-            echo "Unsupported release ref: $ref_name"
-            supported="false"
-          fi
-
-          {
-            echo "supported=$supported"
-            echo "release_tag=$release_tag"
-            echo "version_tag=$version_tag"
-            echo "title=$title"
-            echo "prerelease=$prerelease"
-            echo "latest=$latest"
-            echo "previous_tag=$previous_tag"
-          } >> "$GITHUB_OUTPUT"
-      - name: Package release payload
-        if: steps.release.outputs.supported == 'true'
-        run: |
-          version_tag="${{ steps.release.outputs.version_tag }}"
-          cd dist/out
-          zip -r "../ego-browser-${version_tag}.zip" .
-      - name: Create release
-        if: steps.release.outputs.supported == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          cd "$GITHUB_WORKSPACE"
-
-          release_tag="${{ steps.release.outputs.release_tag }}"
-          version_tag="${{ steps.release.outputs.version_tag }}"
-          title="${{ steps.release.outputs.title }}"
-          prerelease="${{ steps.release.outputs.prerelease }}"
-          latest="${{ steps.release.outputs.latest }}"
-          previous_tag="${{ steps.release.outputs.previous_tag }}"
-          commit_sha="$(git rev-parse HEAD)"
-          artifact="package/ego-browser/dist/ego-browser-${version_tag}.zip"
-          notes_file="$(mktemp)"
-          release_args=()
-          notes_args=()
-
-          if [ "$prerelease" = "false" ] && ! git merge-base --is-ancestor "$commit_sha" origin/main; then
-            echo "Stable release tags must point to commits reachable from main."
-            exit 1
-          fi
-
-          if [ "$prerelease" = "true" ]; then
-            release_args+=(--prerelease)
-          fi
-
-          if [ "$latest" = "true" ]; then
-            release_args+=(--latest)
-          else
-            release_args+=(--latest=false)
-          fi
-
-          if [ -n "$previous_tag" ]; then
-            notes_args+=(-f "previous_tag_name=$previous_tag")
-          fi
-
-          gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
-            -f tag_name="$release_tag" \
-            -f target_commitish="$commit_sha" \
-            "${notes_args[@]}" \
-            --jq .body > "$notes_file"
-
-          if gh release view "$release_tag" >/dev/null 2>&1; then
-            gh release edit "$release_tag" \
-              --title "$title" \
-              --notes-file "$notes_file" \
-              "${release_args[@]}"
-            gh release upload "$release_tag" "$artifact" --clobber
-          else
-            gh release create "$release_tag" \
-              --title "$title" \
-              --notes-file "$notes_file" \
-              --verify-tag \
-              "${release_args[@]}" \
-              "$artifact"
-          fi
+          for alvo in dist/cli.js dist/host-daemon.js dist/ego-runtime.js; do
+            if [ ! -e "$alvo" ]; then
+              echo "::error::build nao gerou $alvo"
+              exit 1
+            fi
+          done
+          echo "artefatos presentes"

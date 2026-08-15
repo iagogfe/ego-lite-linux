@@ -1,75 +1,58 @@
-name: Quality Gates
+# Gate de estilo dos arquivos alterados.
+#
+# Typecheck, testes e audit sairam daqui: o ci.yml ja roda os dois primeiros e o
+# security.yml cobre vulnerabilidade de dependencia com o osv-scanner. Sobrou o
+# prettier, que o lefthook aplica no pre-commit local mas ninguem garante em PR
+# de fora.
+#
+# So arquivos alterados, porque a base herdada do upstream nao esta toda
+# formatada e reprovar o repositorio inteiro seria um gate que se desliga.
+
+name: Estilo
 
 on:
   pull_request:
     paths:
-      - ".github/workflows/quality-gates.yml"
-      - "lefthook.yml"
-      - "package/ego-browser/**"
-      - "skills/ego-browser/learnings/**"
-  push:
-    branches:
-      - dev
-      - main
-    paths:
-      - ".github/workflows/quality-gates.yml"
-      - "lefthook.yml"
-      - "package/ego-browser/**"
-      - "skills/ego-browser/learnings/**"
+      - '.github/workflows/quality-gates.yml'
+      - 'lefthook.yml'
+      - 'package/ego-browser/**'
+      - 'skills/ego-browser/learnings/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
-  quality-gates:
+  prettier:
+    name: Prettier (arquivos alterados)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
-
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+      - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2
         with:
-          fetch-depth: 0
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+          egress-policy: audit
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # a comparacao precisa do commit base
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: package/ego-browser/package-lock.json
 
-      - name: Install dependencies
+      - name: Instalar dependencias
         working-directory: package/ego-browser
         run: npm ci
 
-      - name: Check changed file style
+      - name: Conferir estilo dos arquivos alterados
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            base="${{ github.event.pull_request.base.sha }}"
-          else
-            base="${{ github.event.before }}"
-          fi
-
-          if [ -z "$base" ] || [[ "$base" =~ ^0+$ ]]; then
-            base="$(git rev-list --max-parents=0 HEAD)"
-          fi
-
-          files="$(git diff --name-only --diff-filter=ACMR "$base" HEAD | grep -E '^package/ego-browser/.*\.(ts|mjs|js|json|md)$' || true)"
+          set -euo pipefail
+          files="$(git diff --name-only --diff-filter=ACMR "$BASE_SHA" HEAD \
+            | grep -E '^package/ego-browser/.*\.(ts|mjs|js|json|md)$' || true)"
           [ -z "$files" ] && exit 0
           package/ego-browser/node_modules/.bin/prettier --check $files
-
-      - name: Analyze vulnerabilities
-        working-directory: package/ego-browser
-        run: npm audit --registry=https://registry.npmjs.org --audit-level=moderate
-
-      - name: Check code
-        working-directory: package/ego-browser
-        run: npm run typecheck
-
-      - name: Run smoke tests
-        working-directory: package/ego-browser
-        run: npm test
-
-      - name: Validate site skills
-        working-directory: package/ego-browser
-        run: npm run validate:site-skills
-

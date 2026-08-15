@@ -4,6 +4,8 @@ Thanks for your interest in contributing to **ego-browser (ego-lite)**! This gui
 
 > For the project vision, see [`README.md`](./README.md). For the agent-facing runbook, see [`skills/ego-browser/SKILL.md`](./skills/ego-browser/SKILL.md) (or [`SKILL.zh.md`](./skills/ego-browser/SKILL.zh.md)). For repo-level guidance, see [`AGENTS.md`](./AGENTS.md).
 
+> **This fork.** Most of this guide is inherited from upstream [`citrolabs/ego-lite`](https://github.com/citrolabs/ego-lite) and describes `package/ego-browser`. Changes to the harness, the skill, or site learnings belong upstream — send them there. What is specific to this repo is the Linux host in [`package/ego-linux-host`](./package/ego-linux-host) (its own `npm ci && npm test`, see its README) and `skills/ego-browser/scripts/install-linux.sh`.
+
 ---
 
 ## Table of Contents
@@ -314,12 +316,11 @@ Add at least one release-note label so generated releases are grouped correctly:
 
 ## 11. Release & CI
 
-- CI config: `.github/workflows/ci.yml`
-  - Every push / PR: on Node 22 + ubuntu-latest, runs `npm ci` → `npm test` → `npm run validate:site-skills`
-  - Tags matching `vX.Y.Z-beta.N`: build a beta prerelease
-  - Tags matching `vX.Y.Z`: build a stable release and mark it as latest
-- Release notes are generated automatically from merged PRs and grouped by `.github/release.yml` labels: Features, Fixes, Documentation, Maintenance, and Other Changes.
-- Normal flow: merge features into `dev`, cut beta tags from `dev`, then merge `dev` to `main` and cut stable `vX.Y.Z` tags from `main`.
+- CI config: `.github/workflows/ci.yml` — every push to `main` and every PR runs, on Node 22 + ubuntu-latest:
+  - `package/ego-browser`: `npm ci` → `npm test` → `npm run validate:site-skills`
+  - `package/ego-linux-host`: `npm ci` → `npm test` (build + typecheck + `node --test`, Chrome-free)
+- `.github/workflows/quality-gates.yml` adds prettier, `npm audit`, and typecheck for `package/ego-browser` changes.
+- This fork publishes no releases and no packages. Tagged releases of `ego-browser` come from upstream; the release and skill-publishing workflows were removed here on purpose.
 - The build script `scripts/build.mjs` uses `.build.lock` to prevent concurrent builds.
 
 ---

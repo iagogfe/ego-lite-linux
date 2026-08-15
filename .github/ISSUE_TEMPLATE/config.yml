@@ -1,5 +1,11 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Report a security vulnerability (this fork)
+    url: https://github.com/iagogfe/ego-lite-linux/security/advisories/new
+    about: Privately report vulnerabilities in the Linux host. Do not disclose them in a public issue.
+  - name: Upstream issues (macOS app, ego-browser harness, agent skill)
+    url: https://github.com/CitroLabs/ego-lite/issues
+    about: Anything that is not specific to the Linux host belongs upstream.
   - name: Questions and ideas
     url: https://github.com/CitroLabs/ego-lite/discussions
     about: Ask for help or discuss ideas that are not yet actionable issues.
@@ -9,6 +15,3 @@ contact_links:
   - name: Community support
     url: https://discord.gg/5eGZVvHbTq
     about: Get setup help and talk with the ego lite community.
-  - name: Report a security vulnerability
-    url: https://github.com/CitroLabs/ego-lite/security/advisories/new
-    about: Privately report vulnerabilities. Do not disclose them in a public issue.

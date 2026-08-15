@@ -9,7 +9,7 @@ body:
       value: |
         Thanks for helping us improve ego lite. Please search existing issues first and include the smallest reliable reproduction you can provide.
 
-        For security vulnerabilities, use a [private security advisory](https://github.com/CitroLabs/ego-lite/security/advisories/new) instead.
+        For security vulnerabilities, use a [private security advisory](https://github.com/iagogfe/ego-lite-linux/security/advisories/new) instead.
 
   - type: dropdown
     id: component

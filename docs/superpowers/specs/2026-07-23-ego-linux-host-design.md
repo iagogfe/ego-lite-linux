@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-23  
 **Status:** Approved for planning  
-**Repo:** local clone of `citrolabs/ego-lite` at `/home/iago/projeto/ego-lite`  
+**Repo:** local clone of `citrolabs/ego-lite`  
 **Audience:** implementers building a Linux runtime that preserves the product purpose of ego lite
 
 ---
