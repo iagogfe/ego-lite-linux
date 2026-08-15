@@ -19,7 +19,42 @@ import {
   CLI_HELP,
   unlinkStaleSocket,
   ensureHost,
+  runCli,
 } from "./cli.js";
+
+test("runCli sends the effective config with reload", async () => {
+  const conn = mockConn();
+  const configEnv = {
+    EGO_HOST_SOCK: "/tmp/ego-reload.sock",
+    EGO_DATA_DIR: "/tmp/ego-reload-data",
+    EGO_USER_DATA_DIR: "/tmp/ego-reload-profile",
+    EGO_CDP_PORT: "19321",
+    EGO_HEADLESS: "0",
+    EGO_CONFIG_DIR: "/tmp/ego-reload-config-does-not-exist",
+  };
+
+  const code = await runCli(["--reload"], {
+    env: configEnv,
+    ensureHost: async () => {},
+    connectHost: async () => conn,
+  });
+
+  assert.equal(code, 0);
+  assert.deepEqual(conn.calls[0], [
+    "reload",
+    {
+      config: {
+        chromePath: null,
+        userDataDir: "/tmp/ego-reload-profile",
+        cdpPort: 19321,
+        headless: false,
+        hostSocket: "/tmp/ego-reload.sock",
+        dataDir: "/tmp/ego-reload-data",
+        seedFromChrome: false,
+      },
+    },
+  ]);
+});
 
 function mockConn(handler?: {
   request?: (method: string, params?: any) => Promise<any>;

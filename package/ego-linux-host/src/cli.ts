@@ -10,7 +10,12 @@ import { open, mkdir, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { loadConfig, type HostConfig } from "./config.js";
-import { connectHost, installEgoClient, pingSocket } from "./ego-client.js";
+import {
+  connectHost,
+  installEgoClient,
+  pingSocket,
+  type HostConnection,
+} from "./ego-client.js";
 
 const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -45,6 +50,8 @@ export type RunCliOptions = {
     config: HostConfig,
     options?: { env?: NodeJS.ProcessEnv; packageRoot?: string },
   ) => Promise<void>;
+  /** Override host connection (tests). */
+  connectHost?: (socketPath: string) => Promise<HostConnection>;
   packageRoot?: string;
 };
 
@@ -245,6 +252,7 @@ export async function runCli(
 
   const config = await loadConfig(env);
   const ensure = opts.ensureHost ?? ensureHost;
+  const connect = opts.connectHost ?? connectHost;
 
   if (flags.doctor) {
     await ensure(config, { env, packageRoot });
@@ -254,7 +262,7 @@ export async function runCli(
     } catch {
       harnessPath = null;
     }
-    const conn = await connectHost(config.hostSocket);
+    const conn = await connect(config.hostSocket);
     try {
       const doctor = (await conn.request("doctor")) as Record<string, unknown>;
       writeStream(
@@ -269,9 +277,9 @@ export async function runCli(
 
   if (flags.reload) {
     await ensure(config, { env, packageRoot });
-    const conn = await connectHost(config.hostSocket);
+    const conn = await connect(config.hostSocket);
     try {
-      await conn.request("reload");
+      await conn.request("reload", { config });
       writeStream(stdout, "browser connection reset on next call\n");
       return 0;
     } finally {
@@ -280,7 +288,7 @@ export async function runCli(
   }
 
   await ensure(config, { env, packageRoot });
-  const conn = await connectHost(config.hostSocket);
+  const conn = await connect(config.hostSocket);
   installEgoClient(conn);
 
   let harnessPath: string;
