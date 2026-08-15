@@ -30,11 +30,12 @@ When these fields are unchanged, the daemon retains the current behavior: detach
 
 When one changes, the daemon will:
 
-1. Detach event forwarding and close the current CDP bridge.
-2. Close the current browser through the owned `ChromeHandle`; for an attached browser without an owned PID, request browser shutdown over CDP before closing the bridge.
-3. Ensure Chromium with the requested configuration and connect a new CDP bridge.
-4. Update the active configuration only after the new browser connection succeeds.
-5. Reattach event forwarding.
+1. Detach event forwarding.
+2. Close the current browser through the owned `ChromeHandle`; for an attached browser without an owned PID, request browser shutdown over the current CDP bridge before closing that bridge.
+3. Close the old CDP bridge.
+4. Ensure Chromium with the requested configuration and connect a new CDP bridge.
+5. Update the active configuration only after the new browser connection succeeds.
+6. Reattach event forwarding.
 
 If restart fails, the RPC returns `EGO_BROWSER_UNAVAILABLE`, the requested configuration is not committed, and the next browser operation can retry using the previous active configuration. Task-space state remains managed by the same daemon and is not recreated.
 
