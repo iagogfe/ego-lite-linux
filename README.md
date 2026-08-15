@@ -72,7 +72,7 @@ Design spec: [`docs/superpowers/specs/2026-07-23-ego-linux-host-design.md`](docs
 | Snapshot quality | kernel-level customization | accessibility tree over CDP |
 | Distribution | download + `npx skills add citrolabs/ego-lite` | clone + `install-linux.sh` |
 
-Everything under `package/ego-browser` and `skills/ego-browser` tracks upstream. The Linux-specific work lives in `package/ego-linux-host` and `skills/ego-browser/scripts/install-linux.sh`.
+Everything under `package/ego-browser` and `skills/ego-browser` tracks upstream, minus the workflow that publishes the skill (and its guard test) — this fork publishes nothing. The Linux-specific work lives in `package/ego-linux-host` and `skills/ego-browser/scripts/install-linux.sh`.
 
 ## Development
 

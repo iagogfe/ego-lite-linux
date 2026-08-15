@@ -108,17 +108,28 @@ export async function startDaemon(
 
   let chrome: ChromeHandle | null = null;
   let cdp: CdpBridge | null = null;
+  let chromeStartupError: string | null = null;
 
   if (!options.skipChrome) {
-    chrome = await ensureChromeFn(config);
-    cdp = await connectCdpFn(config.cdpPort);
-    // Adopt orphan page targets into user space
     try {
-      const pages = await cdp.listPageTargets();
-      spaceManager.adoptOrphanTargets(pages.map((p) => p.targetId));
-      await spaceManager.save();
-    } catch {
-      // non-fatal on startup
+      chrome = await ensureChromeFn(config);
+      cdp = await connectCdpFn(config.cdpPort);
+      // Adopt orphan page targets into user space
+      try {
+        const pages = await cdp.listPageTargets();
+        spaceManager.adoptOrphanTargets(pages.map((p) => p.targetId));
+        await spaceManager.save();
+      } catch {
+        // non-fatal on startup
+      }
+    } catch (err) {
+      // Starting without a browser is not fatal: --doctor exists to diagnose
+      // exactly this case, and dying here left the CLI with a socket timeout
+      // that never mentioned Chrome. ensureBrowserReady retries on the next
+      // ego method, same path a mid-session Chrome death takes.
+      chromeStartupError = err instanceof Error ? err.message : String(err);
+      chrome = null;
+      cdp = null;
     }
   } else {
     // Minimal stub so getCdp never throws before a real inject
@@ -193,7 +204,7 @@ export async function startDaemon(
   });
 
   let detachForward: (() => void) | undefined;
-  if (!options.skipChrome) {
+  if (!options.skipChrome && cdp) {
     detachForward = runtime.attachCdpForwarding();
   }
 
@@ -227,6 +238,7 @@ export async function startDaemon(
       chrome = await ensureChromeFn(config);
       cdp = await connectCdpFn(config.cdpPort);
       detachForward = runtime.attachCdpForwarding();
+      chromeStartupError = null;
     } catch (err) {
       const code =
         err &&
@@ -258,7 +270,13 @@ export async function startDaemon(
       return { ok: true, version: HOST_VERSION };
     }
     if (method === "doctor") {
-      return buildDoctor(config, chrome, spaceManager, socketPath);
+      return buildDoctor(
+        config,
+        chrome,
+        spaceManager,
+        socketPath,
+        chromeStartupError,
+      );
     }
     if (method === "reload") {
       // Drop CDP and reconnect; respawn Chrome if CDP is down.
@@ -456,6 +474,7 @@ async function buildDoctor(
   chrome: ChromeHandle | null,
   spaceManager: SpaceManager,
   socketPath: string,
+  chromeError: string | null = null,
 ): Promise<Record<string, unknown>> {
   const cdpUp = await isCdpUp(config.cdpPort);
   const chromePid = chrome?.pid ?? null;
@@ -468,6 +487,8 @@ async function buildDoctor(
     chromePath: config.chromePath,
     chromeRunning,
     chromePid,
+    // Why the browser is missing, when it is. Null when Chrome came up.
+    chromeError,
     cdpPort: config.cdpPort,
     cdpUp,
     profileDir: config.userDataDir,

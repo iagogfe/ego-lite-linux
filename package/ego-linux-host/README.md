@@ -88,10 +88,11 @@ Without Chrome + display, skip the smoke script; unit/integration tests still pa
 
 ## Diagnostics (`ego-browser --doctor`)
 
-Reports (among others): `chromePath`, `chromeRunning`, `cdpPort`, `cdpUp`, `profileDir`, `socketPath`, `daemonPid`, `spaceCount`, `selectedSpace`, `headless`, `displayEnv`, `harnessPath`.
+Reports (among others): `chromePath`, `chromeRunning`, `chromeError`, `cdpPort`, `cdpUp`, `profileDir`, `socketPath`, `daemonPid`, `spaceCount`, `selectedSpace`, `headless`, `displayEnv`, `harnessPath`.
 
 Hardening behavior:
 
+- **No Chrome at all**: the daemon still starts, `--doctor` answers with `cdpUp: false` and `chromeError` naming the cause. Diagnostics must not depend on the thing they diagnose.
 - **Stale socket**: if `host.sock` exists but ping fails, the CLI unlinks it and restarts the daemon.
 - **Chrome death**: the next ego RPC that needs the browser re-runs `ensureChrome` (attach if CDP is back, otherwise respawn). Failures surface as `EGO_BROWSER_UNAVAILABLE` with clear text.
 

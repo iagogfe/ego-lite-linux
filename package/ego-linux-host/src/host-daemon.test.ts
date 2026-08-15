@@ -287,3 +287,46 @@ test("daemon throws EGO_BROWSER_UNAVAILABLE when ensureChrome fails on ego metho
     }
   });
 });
+
+test("daemon starts and doctor answers when Chrome is missing at startup", async () => {
+  await withTempDir(async (dir) => {
+    const config = testConfig(dir);
+    config.cdpPort = 1;
+
+    // No Chrome on the machine at all: the daemon used to die here, which took
+    // --doctor down with it and left the CLI printing a socket timeout.
+    const daemon = await startDaemon({
+      config,
+      ensureChrome: async () => {
+        throw Object.assign(
+          new Error("Chrome/Chromium binary not found. Set EGO_CHROME_PATH"),
+          { error_code: "EGO_BROWSER_UNAVAILABLE" },
+        );
+      },
+    });
+    try {
+      assert.deepEqual(await rpcCall(daemon.socketPath, "ping"), {
+        ok: true,
+        version: HOST_VERSION,
+      });
+
+      const doctor = await rpcCall(daemon.socketPath, "doctor", undefined, 2);
+      assert.equal(doctor.ok, true);
+      assert.equal(doctor.cdpUp, false);
+      assert.equal(doctor.chromeRunning, false);
+      assert.match(String(doctor.chromeError), /binary not found/);
+
+      // ego methods still gate on the browser, but now say why.
+      await assert.rejects(
+        () => rpcCall(daemon.socketPath, "ego.listTaskSpaces", undefined, 3),
+        (err: any) => {
+          assert.equal(err.error_code, "EGO_BROWSER_UNAVAILABLE");
+          assert.match(String(err.message), /binary not found/);
+          return true;
+        },
+      );
+    } finally {
+      await daemon.close();
+    }
+  });
+});
