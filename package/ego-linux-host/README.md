@@ -96,6 +96,14 @@ Hardening behavior:
 - **Stale socket**: if `host.sock` exists but ping fails, the CLI unlinks it and restarts the daemon.
 - **Chrome death**: the next ego RPC that needs the browser re-runs `ensureChrome` (attach if CDP is back, otherwise respawn). Failures surface as `EGO_BROWSER_UNAVAILABLE` with clear text.
 
+### Reloading configuration (`ego-browser --reload`)
+
+The CLI resolves the current effective host configuration and sends it with `--reload`.
+
+- Changes to `headless`, `chromePath`, `userDataDir`, or `cdpPort` restart Chromium while preserving task spaces.
+- If those browser-launch fields are unchanged, reload only reconnects the CDP browser connection.
+- If the restart fails, reload reports `EGO_BROWSER_UNAVAILABLE`.
+
 ## Source layout
 
 ```text

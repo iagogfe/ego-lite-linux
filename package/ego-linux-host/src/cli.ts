@@ -36,7 +36,8 @@ Typical usage:
 Commands:
   ego-browser --help           show this help
   ego-browser --doctor         ensure host and print diagnostics
-  ego-browser --reload         reconnect host CDP channel
+  ego-browser --reload         apply current effective host configuration
+                              (restart Chromium if launch fields change; otherwise reconnect CDP)
 `;
 
 export type RunCliOptions = {

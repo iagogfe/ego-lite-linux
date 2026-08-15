@@ -246,6 +246,7 @@ test("parseCliFlags detects help/doctor/reload", () => {
 test("CLI_HELP mentions doctor and reload", () => {
   assert.match(CLI_HELP, /--doctor/);
   assert.match(CLI_HELP, /--reload/);
+  assert.match(CLI_HELP, /configuration/i);
   assert.match(CLI_HELP, /ego-browser/);
 });
 
