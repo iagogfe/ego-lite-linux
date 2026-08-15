@@ -31,6 +31,9 @@ import { SpaceManager } from "./space-manager.js";
 
 export const HOST_VERSION = "0.1.0";
 
+const BROWSER_SHUTDOWN_TIMEOUT_MS = 3000;
+const BROWSER_SHUTDOWN_POLL_MS = 25;
+
 const BROWSER_CONFIG_KEYS = [
   "chromePath",
   "userDataDir",
@@ -52,6 +55,8 @@ export type HostDaemonOptions = {
   connectCdp?: (port: number) => Promise<CdpBridge>;
   /** Inject Chrome ensure (defaults to ensureChrome). */
   ensureChrome?: (config: HostConfig) => Promise<ChromeHandle>;
+  /** Override attached-browser shutdown confirmation timeout (tests). */
+  browserShutdownTimeoutMs?: number;
   /** Override spaces.json path. */
   spacesPath?: string;
   /** Override pid file path. */
@@ -112,6 +117,10 @@ function browserConfig(config: HostConfig): BrowserConfig {
   };
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
  * Start the host daemon: config → chrome → CDP → spaces → Unix socket.
  */
@@ -133,6 +142,8 @@ export async function startDaemon(
 
   const ensureChromeFn = options.ensureChrome ?? ensureChrome;
   const connectCdpFn = options.connectCdp ?? connectCdp;
+  const browserShutdownTimeoutMs =
+    options.browserShutdownTimeoutMs ?? BROWSER_SHUTDOWN_TIMEOUT_MS;
 
   let chrome: ChromeHandle | null = null;
   let cdp: CdpBridge | null = null;
@@ -263,10 +274,30 @@ export async function startDaemon(
       if (previousChrome && previousChrome.pid > 0) {
         await previousChrome.kill();
       } else if (previousCdp) {
+        let closeError: unknown;
         try {
-          await previousCdp.send("Browser.close");
-        } catch {
-          // Browser.close normally drops its CDP transport before replying.
+          void previousCdp.send("Browser.close").catch((err) => {
+            // The transport normally drops before Browser.close can reply.
+            closeError = err;
+          });
+        } catch (err) {
+          closeError = err;
+        }
+
+        const port = previousChrome?.cdpPort ?? config.cdpPort;
+        const deadline = Date.now() + browserShutdownTimeoutMs;
+        while (await isCdpUp(port)) {
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) {
+            const detail = closeError
+              ? `: ${closeError instanceof Error ? closeError.message : String(closeError)}`
+              : "";
+            throw makeEgoError(
+              "EGO_BROWSER_UNAVAILABLE",
+              `Attached browser did not stop within ${browserShutdownTimeoutMs}ms${detail}`,
+            );
+          }
+          await sleep(Math.min(BROWSER_SHUTDOWN_POLL_MS, remaining));
         }
       }
     } finally {
@@ -360,6 +391,18 @@ export async function startDaemon(
   }
 
   const clients = new Set<Socket>();
+  let lifecycleTail: Promise<void> = Promise.resolve();
+
+  function serializeBrowserLifecycle<T>(
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const result = lifecycleTail.then(operation, operation);
+    lifecycleTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
 
   async function handleRequest(
     method: string,
@@ -392,7 +435,7 @@ export async function startDaemon(
         chrome = newChrome;
         cdp = await connectCdpFn(requestedConfig.cdpPort);
         detachForward = runtime.attachCdpForwarding();
-        Object.assign(config, requestedConfig);
+        Object.assign(config, browserConfig(requestedConfig));
         chromeStartupError = null;
       } catch (err) {
         if (detachForward) {
@@ -472,7 +515,12 @@ export async function startDaemon(
               return;
             }
             id = msg.id;
-            const result = await handleRequest(msg.method, msg.params);
+            const result =
+              msg.method === "reload" || msg.method.startsWith("ego.")
+                ? await serializeBrowserLifecycle(() =>
+                    handleRequest(msg.method, msg.params),
+                  )
+                : await handleRequest(msg.method, msg.params);
             writeToClient(socket, encodeResponse({ id, result }));
           } catch (err) {
             if (id >= 0) {
