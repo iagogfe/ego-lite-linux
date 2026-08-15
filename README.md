@@ -42,7 +42,7 @@ The installer builds the harness and the host, symlinks `ego-browser` into `~/.l
 
 Do **not** run `skills/ego-browser/scripts/install.sh` here — that is the upstream macOS path and it expects the ego lite DMG.
 
-Headed mode wants a display (WSLg or native `DISPLAY`); otherwise set `EGO_HEADLESS=1`. For a non-standard browser, set `EGO_CHROME_PATH=/path/to/chrome`.
+Headed mode wants a display (WSLg or native `DISPLAY`); otherwise set `EGO_HEADLESS=1`. For a non-standard browser, set `EGO_CHROME_PATH=/path/to/chrome`. With no browser installed at all, `--doctor` still answers and reports `chromeError` telling you so.
 
 Full install notes and troubleshooting: [`skills/ego-browser/references/install.md`](skills/ego-browser/references/install.md) (section **Install steps (Linux / WSL)**).
 
