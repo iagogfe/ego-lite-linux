@@ -31,6 +31,18 @@ import { SpaceManager } from "./space-manager.js";
 
 export const HOST_VERSION = "0.1.0";
 
+const BROWSER_CONFIG_KEYS = [
+  "chromePath",
+  "userDataDir",
+  "cdpPort",
+  "headless",
+] as const;
+
+type BrowserConfig = Pick<
+  HostConfig,
+  (typeof BROWSER_CONFIG_KEYS)[number]
+>;
+
 export type HostDaemonOptions = {
   config?: HostConfig;
   env?: NodeJS.ProcessEnv;
@@ -82,6 +94,22 @@ async function safeUnlink(path: string): Promise<void> {
     const code = (err as NodeJS.ErrnoException)?.code;
     if (code !== "ENOENT") throw err;
   }
+}
+
+function browserConfigChanged(
+  current: HostConfig,
+  requested: HostConfig,
+): boolean {
+  return BROWSER_CONFIG_KEYS.some((key) => current[key] !== requested[key]);
+}
+
+function browserConfig(config: HostConfig): BrowserConfig {
+  return {
+    chromePath: config.chromePath,
+    userDataDir: config.userDataDir,
+    cdpPort: config.cdpPort,
+    headless: config.headless,
+  };
 }
 
 /**
@@ -208,6 +236,88 @@ export async function startDaemon(
     detachForward = runtime.attachCdpForwarding();
   }
 
+  async function closeCdpBridge(): Promise<void> {
+    if (detachForward) {
+      detachForward();
+      detachForward = undefined;
+    }
+    if (cdp) {
+      try {
+        await cdp.close();
+      } catch {
+        // Ignore transport errors while disconnecting a bridge.
+      }
+      cdp = null;
+    }
+  }
+
+  async function shutdownBrowser(): Promise<void> {
+    const previousChrome = chrome;
+    const previousCdp = cdp;
+    if (detachForward) {
+      detachForward();
+      detachForward = undefined;
+    }
+
+    try {
+      if (previousChrome && previousChrome.pid > 0) {
+        await previousChrome.kill();
+      } else if (previousCdp) {
+        try {
+          await previousCdp.send("Browser.close");
+        } catch {
+          // Browser.close normally drops its CDP transport before replying.
+        }
+      }
+    } finally {
+      if (previousCdp) {
+        try {
+          await previousCdp.close();
+        } catch {
+          // Browser shutdown can close the transport before the bridge does.
+        }
+      }
+      chrome = null;
+      cdp = null;
+    }
+  }
+
+  function throwReloadBrowserUnavailable(err: unknown): never {
+    const code =
+      err &&
+      typeof err === "object" &&
+      typeof (err as { error_code?: string }).error_code === "string"
+        ? (err as { error_code: string }).error_code
+        : undefined;
+    if (code === "EGO_BROWSER_UNAVAILABLE") throw err;
+    const message =
+      err instanceof Error
+        ? err.message
+        : typeof err === "string"
+          ? err
+          : String(err);
+    throw makeEgoError(
+      "EGO_BROWSER_UNAVAILABLE",
+      `Browser/CDP unavailable after reload: ${message}`,
+    );
+  }
+
+  async function reconnectBrowser(): Promise<void> {
+    await closeCdpBridge();
+    if (options.skipChrome) return;
+
+    try {
+      if (!(await isCdpUp(config.cdpPort))) {
+        chrome = await ensureChromeFn(config);
+      }
+      cdp = await connectCdpFn(config.cdpPort);
+      detachForward = runtime.attachCdpForwarding();
+      chromeStartupError = null;
+    } catch (err) {
+      throwReloadBrowserUnavailable(err);
+    }
+  }
+
   /**
    * If Chrome/CDP died, respawn via ensureChrome and reconnect the bridge.
    * Ego methods call this so a dead browser surfaces as a clear
@@ -220,18 +330,7 @@ export async function startDaemon(
       return;
     }
 
-    if (detachForward) {
-      detachForward();
-      detachForward = undefined;
-    }
-    if (cdp) {
-      try {
-        await cdp.close();
-      } catch {
-        // ignore
-      }
-      cdp = null;
-    }
+    await closeCdpBridge();
 
     try {
       // ensureChrome attaches if CDP is already back, otherwise respawns Chrome.
@@ -279,45 +378,43 @@ export async function startDaemon(
       );
     }
     if (method === "reload") {
-      // Drop CDP and reconnect; respawn Chrome if CDP is down.
-      if (detachForward) {
-        detachForward();
-        detachForward = undefined;
+      const requestedConfig = params?.config as HostConfig | undefined;
+      if (!requestedConfig || !browserConfigChanged(config, requestedConfig)) {
+        await reconnectBrowser();
+        return { ok: true };
       }
-      if (cdp) {
+
+      const previousBrowserConfig = browserConfig(config);
+      let newChrome: ChromeHandle | null = null;
+      try {
+        await shutdownBrowser();
+        newChrome = await ensureChromeFn(requestedConfig);
+        chrome = newChrome;
+        cdp = await connectCdpFn(requestedConfig.cdpPort);
+        detachForward = runtime.attachCdpForwarding();
+        Object.assign(config, requestedConfig);
+        chromeStartupError = null;
+      } catch (err) {
+        if (detachForward) {
+          detachForward();
+          detachForward = undefined;
+        }
         try {
-          await cdp.close();
+          await cdp?.close();
         } catch {
-          // ignore
+          // Ignore a partially connected bridge.
         }
         cdp = null;
-      }
-      if (!options.skipChrome) {
-        try {
-          if (!(await isCdpUp(config.cdpPort))) {
-            chrome = await ensureChromeFn(config);
+        if (newChrome) {
+          try {
+            await newChrome.kill();
+          } catch {
+            // Preserve the original startup error.
           }
-          cdp = await connectCdpFn(config.cdpPort);
-          detachForward = runtime.attachCdpForwarding();
-        } catch (err) {
-          const code =
-            err &&
-            typeof err === "object" &&
-            typeof (err as { error_code?: string }).error_code === "string"
-              ? (err as { error_code: string }).error_code
-              : undefined;
-          if (code === "EGO_BROWSER_UNAVAILABLE") throw err;
-          const message =
-            err instanceof Error
-              ? err.message
-              : typeof err === "string"
-                ? err
-                : String(err);
-          throw makeEgoError(
-            "EGO_BROWSER_UNAVAILABLE",
-            `Browser/CDP unavailable after reload: ${message}`,
-          );
         }
+        chrome = null;
+        Object.assign(config, previousBrowserConfig);
+        throwReloadBrowserUnavailable(err);
       }
       return { ok: true };
     }

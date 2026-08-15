@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createServer as createHttpServer } from "node:http";
 import { createConnection } from "node:net";
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -12,6 +13,7 @@ import {
   LineBuffer,
 } from "./rpc.js";
 import type { HostConfig } from "./config.js";
+import type { CdpBridge } from "./cdp-bridge.js";
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   const dir = join(
@@ -83,6 +85,60 @@ function testConfig(dir: string): HostConfig {
     hostSocket: join(dir, "host.sock"),
     dataDir: dir,
     seedFromChrome: false,
+  };
+}
+
+function fakeCdp(): CdpBridge {
+  return {
+    async send() {
+      return {};
+    },
+    sendRaw() {},
+    onEvent() {
+      return () => {};
+    },
+    onMessage() {
+      return () => {};
+    },
+    async close() {},
+    async listPageTargets() {
+      return [];
+    },
+    async createTarget() {
+      return "target";
+    },
+    async attach() {
+      return "session";
+    },
+  };
+}
+
+async function startCdpProbe(): Promise<{
+  port: number;
+  close(): Promise<void>;
+}> {
+  const server = createHttpServer((req, res) => {
+    res.writeHead(req.url === "/json/version" ? 200 : 404);
+    res.end();
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.removeListener("error", reject);
+      resolve();
+    });
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("CDP probe did not expose a TCP port");
+  }
+  return {
+    port: address.port,
+    async close() {
+      await new Promise<void>((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      });
+    },
   };
 }
 
@@ -327,6 +383,113 @@ test("daemon starts and doctor answers when Chrome is missing at startup", async
       );
     } finally {
       await daemon.close();
+    }
+  });
+});
+
+test("reload with unchanged browser config reconnects without restarting Chrome", async () => {
+  await withTempDir(async (dir) => {
+    const config = testConfig(dir);
+    const probe = await startCdpProbe();
+    config.cdpPort = probe.port;
+    let ensureCount = 0;
+    let killCount = 0;
+    const daemon = await startDaemon({
+      config,
+      ensureChrome: async () => {
+        ensureCount++;
+        return {
+          pid: 42,
+          cdpPort: config.cdpPort,
+          userDataDir: config.userDataDir,
+          async kill() {
+            killCount++;
+          },
+        };
+      },
+      connectCdp: async () => fakeCdp(),
+    });
+    try {
+      await rpcCall(daemon.socketPath, "reload", { config });
+      assert.equal(ensureCount, 1);
+      assert.equal(killCount, 0);
+    } finally {
+      await daemon.close();
+      await probe.close();
+    }
+  });
+});
+
+test("reload with changed browser config replaces Chrome and commits the new config", async () => {
+  await withTempDir(async (dir) => {
+    const config = testConfig(dir);
+    const probe = await startCdpProbe();
+    config.cdpPort = probe.port;
+    const requested = { ...config, headless: false };
+    const ensureConfigs: HostConfig[] = [];
+    let killCount = 0;
+    const daemon = await startDaemon({
+      config,
+      ensureChrome: async (received) => {
+        ensureConfigs.push({ ...received });
+        return {
+          pid: 42,
+          cdpPort: received.cdpPort,
+          userDataDir: received.userDataDir,
+          async kill() {
+            killCount++;
+          },
+        };
+      },
+      connectCdp: async () => fakeCdp(),
+    });
+    try {
+      await rpcCall(daemon.socketPath, "reload", { config: requested });
+      assert.equal(killCount, 1);
+      assert.equal(ensureConfigs.length, 2);
+      assert.equal(ensureConfigs[1].headless, false);
+      assert.equal(daemon.config.headless, false);
+    } finally {
+      await daemon.close();
+      await probe.close();
+    }
+  });
+});
+
+test("reload failure keeps the previous browser config", async () => {
+  await withTempDir(async (dir) => {
+    const config = testConfig(dir);
+    const probe = await startCdpProbe();
+    config.cdpPort = probe.port;
+    const requested = { ...config, headless: false };
+    let ensureCount = 0;
+    const daemon = await startDaemon({
+      config,
+      ensureChrome: async () => {
+        ensureCount++;
+        if (ensureCount === 2) {
+          throw Object.assign(new Error("spawn failed"), {
+            error_code: "EGO_BROWSER_UNAVAILABLE",
+          });
+        }
+        return {
+          pid: 42,
+          cdpPort: config.cdpPort,
+          userDataDir: config.userDataDir,
+          async kill() {},
+        };
+      },
+      connectCdp: async () => fakeCdp(),
+    });
+    try {
+      await assert.rejects(
+        () => rpcCall(daemon.socketPath, "reload", { config: requested }),
+        (err: any) => err.error_code === "EGO_BROWSER_UNAVAILABLE",
+      );
+      assert.equal(daemon.config.headless, true);
+    } finally {
+      await daemon.close();
+      await probe.close();
     }
   });
 });
