@@ -16,6 +16,7 @@ on:
       - '.github/workflows/quality-gates.yml'
       - 'lefthook.yml'
       - 'package/ego-browser/**'
+      - 'package/ego-linux-host/**'
       - 'skills/ego-browser/learnings/**'
 
 concurrency:
@@ -29,6 +30,7 @@ jobs:
   prettier:
     name: Prettier (arquivos alterados)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2
         with:
@@ -53,6 +55,6 @@ jobs:
         run: |
           set -euo pipefail
           files="$(git diff --name-only --diff-filter=ACMR "$BASE_SHA" HEAD \
-            | grep -E '^package/ego-browser/.*\.(ts|mjs|js|json|md)$' || true)"
+            | grep -E '^package/(ego-browser|ego-linux-host)/.*\.(ts|mjs|js|json|md)$' || true)"
           [ -z "$files" ] && exit 0
           package/ego-browser/node_modules/.bin/prettier --check $files

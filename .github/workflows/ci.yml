@@ -25,6 +25,7 @@ jobs:
   ego-browser:
     name: ego-browser (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -53,6 +54,7 @@ jobs:
   ego-linux-host:
     name: ego-linux-host (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -91,3 +93,73 @@ jobs:
             fi
           done
           echo "artefatos presentes"
+
+  # F1: o produto e um host de Chromium e ate aqui nada no CI abria um browser.
+  # O runner ja traz Google Chrome e Chromium pre-instalados, entao o e2e real
+  # custa um job — e cobre a classe de bug (CDP, socket, spawn) que os testes
+  # unitarios, todos Chrome-free, nao alcancam.
+  #
+  # De quebra valida o install-linux.sh, que e o primeiro comando do README:
+  # em vez de montar o ambiente na mao, o job instala como um usuario instala.
+  e2e:
+    name: E2E com Chrome (headless)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+
+      - name: Instalar pelo caminho documentado no README
+        run: bash skills/ego-browser/scripts/install-linux.sh --no-doctor
+
+      - name: Diagnostico do host
+        env:
+          EGO_HEADLESS: '1'
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          ego-browser --doctor | tee doctor.json
+          # o que decide se o e2e pode rodar e o CDP responder, nao o caminho
+          # configurado: o host tambem resolve o binario sozinho pelo PATH.
+          node -e '
+            const d = require("./doctor.json");
+            if (d.chromeError) { console.error("::error::" + d.chromeError); process.exit(1) }
+            if (!d.cdpUp) { console.error("::error::CDP nao respondeu na porta " + d.cdpPort); process.exit(1) }
+            console.log("chrome:", d.chromePath ?? "(resolvido no PATH)", "| pid:", d.chromePid);
+          '
+
+      - name: Smoke ponta a ponta (example.com)
+        working-directory: package/ego-linux-host
+        env:
+          EGO_HEADLESS: '1'
+          EGO_LINUX_E2E: '1'
+        run: npm test
+
+      - name: Log do daemon quando falha
+        if: failure()
+        run: cat "${XDG_DATA_HOME:-$HOME/.local/share}/ego-lite/host.log" || true
+
+  # F3: install-linux.sh e a porta de entrada do README e nunca foi checado.
+  # shellcheck ja vem no runner, entao nao entra action de terceiro.
+  shell:
+    name: Shellcheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Checar os scripts shell versionados
+        run: |
+          mapfile -t scripts < <(git ls-files '*.sh')
+          printf 'checando: %s\n' "${scripts[@]}"
+          shellcheck --severity=warning "${scripts[@]}"

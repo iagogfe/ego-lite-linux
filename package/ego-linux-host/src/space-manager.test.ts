@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { SpaceManager } from "./space-manager.js";
@@ -90,7 +90,13 @@ test("assignTarget moves tab between spaces", () => {
   assert.equal(sm.spaceIdForTarget("shared"), a.id);
   sm.assignTarget("shared", b.id);
   assert.equal(sm.spaceIdForTarget("shared"), b.id);
-  assert.equal(sm.list().find((s) => s.id === a.id)?.targetIds.includes("shared"), false);
+  assert.equal(
+    sm
+      .list()
+      .find((s) => s.id === a.id)
+      ?.targetIds.includes("shared"),
+    false,
+  );
 });
 
 test("adoptOrphanTargets puts unknowns on user space", () => {
@@ -111,7 +117,10 @@ test("closeSelected returns targetIds and removes agent space", () => {
   sm.assignTarget("c2");
   const closed = sm.closeSelected();
   assert.deepEqual(closed.sort(), ["c1", "c2"]);
-  assert.equal(sm.list().find((s) => s.id === a.id), undefined);
+  assert.equal(
+    sm.list().find((s) => s.id === a.id),
+    undefined,
+  );
   assert.equal(sm.selected(), null);
 });
 
@@ -133,6 +142,24 @@ test("claim selects space and can rename", () => {
   assert.equal(claimed.name, "claimed-user");
   assert.equal(sm.selected()?.id, 1);
   assert.equal(sm.isPageControlBlocked(), false);
+});
+
+test("save cria o diretorio com 0700", async () => {
+  const dir = join(
+    tmpdir(),
+    `ego-spaces-mode-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+  );
+  const sm = new SpaceManager(join(dir, "sub", "spaces.json"));
+  try {
+    await sm.load();
+    await sm.save();
+    const { mode } = await stat(join(dir, "sub"));
+    // spaces.json lista os tabsets do usuario; diretorio legivel por outros
+    // usuarios da maquina seria vazamento de contexto de navegacao
+    assert.equal(mode & 0o777, 0o700);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("persist save/load round-trips spaces and selection", async () => {

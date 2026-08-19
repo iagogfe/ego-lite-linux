@@ -242,8 +242,15 @@ export function installEgoClient(conn: HostConnection): void {
       }
       return p;
     },
-    animationHighlightMouseToPosition: async () => {},
-    setAgentTaskState: async () => {},
+    // cosmetic effects: fire-and-forget, errors never reach the agent path
+    animationHighlightMouseToPosition: async (x: number, y: number) => {
+      conn
+        .request("ego.animationHighlightMouseToPosition", { x, y })
+        .catch(() => {});
+    },
+    setAgentTaskState: async (label: string) => {
+      conn.request("ego.setAgentTaskState", { label }).catch(() => {});
+    },
   };
 
   conn.onEvent((event, params) => {

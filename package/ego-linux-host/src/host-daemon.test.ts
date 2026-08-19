@@ -260,6 +260,7 @@ test("daemon respawns Chrome via ensureChrome when CDP is down on ego method", a
           pid: 42,
           cdpPort: config.cdpPort,
           userDataDir: config.userDataDir,
+          path: "/usr/bin/google-chrome",
           async kill() {},
         };
       },
@@ -315,6 +316,7 @@ test("daemon throws EGO_BROWSER_UNAVAILABLE when ensureChrome fails on ego metho
             pid: 0,
             cdpPort: config.cdpPort,
             userDataDir: config.userDataDir,
+            path: null,
             async kill() {},
           };
         }
@@ -355,6 +357,53 @@ test("daemon throws EGO_BROWSER_UNAVAILABLE when ensureChrome fails on ego metho
           return true;
         },
       );
+    } finally {
+      await daemon.close();
+    }
+  });
+});
+
+test("doctor reporta o binario em uso, nao so o configurado", async () => {
+  await withTempDir(async (dir) => {
+    const config = testConfig(dir); // chromePath: null, como numa maquina sem config
+    const daemon = await startDaemon({
+      config,
+      // host resolveu o Chrome pelo PATH: o handle sabe qual binario subiu
+      ensureChrome: async () => ({
+        pid: 4242,
+        cdpPort: config.cdpPort,
+        userDataDir: config.userDataDir,
+        path: "/usr/bin/google-chrome",
+        async kill() {},
+      }),
+      connectCdp: async () => ({
+        async send() {
+          return {};
+        },
+        sendRaw() {},
+        onEvent() {
+          return () => {};
+        },
+        onMessage() {
+          return () => {};
+        },
+        async close() {},
+        async listPageTargets() {
+          return [];
+        },
+        async createTarget() {
+          return "t";
+        },
+        async attach() {
+          return "s";
+        },
+      }),
+    });
+    try {
+      const doctor = await rpcCall(daemon.socketPath, "doctor");
+      // reportar null aqui dizia "sem Chrome" com o browser rodando ao lado
+      assert.equal(doctor.chromePath, "/usr/bin/google-chrome");
+      assert.equal(doctor.chromePid, 4242);
     } finally {
       await daemon.close();
     }
