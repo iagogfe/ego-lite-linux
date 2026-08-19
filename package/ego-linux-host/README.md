@@ -78,13 +78,13 @@ Without Chrome + display, skip the smoke script; unit/integration tests still pa
 
 ## Path defaults
 
-| Helper | Env override | Default |
-|--------|--------------|---------|
-| `defaultDataDir()` | `EGO_DATA_DIR` | `$XDG_DATA_HOME/ego-lite` or `~/.local/share/ego-lite` |
-| `defaultConfigDir()` | `EGO_CONFIG_DIR` | `$XDG_CONFIG_HOME/ego-lite` or `~/.config/ego-lite` |
-| `defaultProfileDir()` | `EGO_USER_DATA_DIR` | `<dataDir>/profile` |
-| `defaultSocketPath()` | `EGO_HOST_SOCK` | `<dataDir>/host.sock` |
-| `defaultCdpPort()` | `EGO_CDP_PORT` | `9222` |
+| Helper                | Env override        | Default                                                |
+| --------------------- | ------------------- | ------------------------------------------------------ |
+| `defaultDataDir()`    | `EGO_DATA_DIR`      | `$XDG_DATA_HOME/ego-lite` or `~/.local/share/ego-lite` |
+| `defaultConfigDir()`  | `EGO_CONFIG_DIR`    | `$XDG_CONFIG_HOME/ego-lite` or `~/.config/ego-lite`    |
+| `defaultProfileDir()` | `EGO_USER_DATA_DIR` | `<dataDir>/profile`                                    |
+| `defaultSocketPath()` | `EGO_HOST_SOCK`     | `<dataDir>/host.sock`                                  |
+| `defaultCdpPort()`    | `EGO_CDP_PORT`      | `9222`                                                 |
 
 ## Diagnostics (`ego-browser --doctor`)
 
@@ -95,6 +95,14 @@ Hardening behavior:
 - **No Chrome at all**: the daemon still starts, `--doctor` answers with `cdpUp: false` and `chromeError` naming the cause. Diagnostics must not depend on the thing they diagnose.
 - **Stale socket**: if `host.sock` exists but ping fails, the CLI unlinks it and restarts the daemon.
 - **Chrome death**: the next ego RPC that needs the browser re-runs `ensureChrome` (attach if CDP is back, otherwise respawn). Failures surface as `EGO_BROWSER_UNAVAILABLE` with clear text.
+
+### Reloading configuration (`ego-browser --reload`)
+
+The CLI resolves the current effective host configuration and sends it with `--reload`.
+
+- Changes to `headless`, `chromePath`, `userDataDir`, or `cdpPort` restart Chromium while preserving task spaces.
+- If those browser-launch fields are unchanged, reload only reconnects the CDP browser connection.
+- If the restart fails, reload reports `EGO_BROWSER_UNAVAILABLE`.
 
 ## Source layout
 

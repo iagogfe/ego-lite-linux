@@ -19,12 +19,50 @@ import {
   CLI_HELP,
   unlinkStaleSocket,
   ensureHost,
+  runCli,
 } from "./cli.js";
+
+test("runCli sends the effective config with reload", async () => {
+  const conn = mockConn();
+  const configEnv = {
+    EGO_HOST_SOCK: "/tmp/ego-reload.sock",
+    EGO_DATA_DIR: "/tmp/ego-reload-data",
+    EGO_USER_DATA_DIR: "/tmp/ego-reload-profile",
+    EGO_CDP_PORT: "19321",
+    EGO_HEADLESS: "0",
+    EGO_CONFIG_DIR: "/tmp/ego-reload-config-does-not-exist",
+  };
+
+  const code = await runCli(["--reload"], {
+    env: configEnv,
+    ensureHost: async () => {},
+    connectHost: async () => conn,
+  });
+
+  assert.equal(code, 0);
+  assert.deepEqual(conn.calls[0], [
+    "reload",
+    {
+      config: {
+        chromePath: null,
+        userDataDir: "/tmp/ego-reload-profile",
+        cdpPort: 19321,
+        headless: false,
+        hostSocket: "/tmp/ego-reload.sock",
+        dataDir: "/tmp/ego-reload-data",
+        seedFromChrome: false,
+      },
+    },
+  ]);
+});
 
 function mockConn(handler?: {
   request?: (method: string, params?: any) => Promise<any>;
   events?: Array<(event: string, params?: any) => void>;
-}): HostConnection & { emit: (event: string, params?: any) => void; calls: any[] } {
+}): HostConnection & {
+  emit: (event: string, params?: any) => void;
+  calls: any[];
+} {
   const calls: any[] = [];
   const listeners = new Set<(event: string, params?: any) => void>();
   return {
@@ -60,7 +98,8 @@ test("installEgoClient maps createTab(url) and createTaskSpace(name)", async () 
   const conn = mockConn({
     async request(method, params) {
       if (method === "ego.createTab") return { targetId: "t1" };
-      if (method === "ego.createTaskSpace") return { id: 2, name: params?.name };
+      if (method === "ego.createTaskSpace")
+        return { id: 2, name: params?.name };
       return {};
     },
   });
@@ -225,6 +264,7 @@ test("parseCliFlags detects help/doctor/reload", () => {
 test("CLI_HELP mentions doctor and reload", () => {
   assert.match(CLI_HELP, /--doctor/);
   assert.match(CLI_HELP, /--reload/);
+  assert.match(CLI_HELP, /configuration/i);
   assert.match(CLI_HELP, /ego-browser/);
 });
 

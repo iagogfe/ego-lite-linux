@@ -31,6 +31,18 @@ import { SpaceManager } from "./space-manager.js";
 
 export const HOST_VERSION = "0.1.0";
 
+const BROWSER_SHUTDOWN_TIMEOUT_MS = 3000;
+const BROWSER_SHUTDOWN_POLL_MS = 25;
+
+const BROWSER_CONFIG_KEYS = [
+  "chromePath",
+  "userDataDir",
+  "cdpPort",
+  "headless",
+] as const;
+
+type BrowserConfig = Pick<HostConfig, (typeof BROWSER_CONFIG_KEYS)[number]>;
+
 export type HostDaemonOptions = {
   config?: HostConfig;
   env?: NodeJS.ProcessEnv;
@@ -40,6 +52,8 @@ export type HostDaemonOptions = {
   connectCdp?: (port: number) => Promise<CdpBridge>;
   /** Inject Chrome ensure (defaults to ensureChrome). */
   ensureChrome?: (config: HostConfig) => Promise<ChromeHandle>;
+  /** Override attached-browser shutdown confirmation timeout (tests). */
+  browserShutdownTimeoutMs?: number;
   /** Override spaces.json path. */
   spacesPath?: string;
   /** Override pid file path. */
@@ -56,10 +70,7 @@ export type HostDaemon = {
   close(): Promise<void>;
 };
 
-function errorToRpc(
-  id: number,
-  err: unknown,
-): RpcResponse {
+function errorToRpc(id: number, err: unknown): RpcResponse {
   const code =
     err &&
     typeof err === "object" &&
@@ -84,6 +95,26 @@ async function safeUnlink(path: string): Promise<void> {
   }
 }
 
+function browserConfigChanged(
+  current: HostConfig,
+  requested: HostConfig,
+): boolean {
+  return BROWSER_CONFIG_KEYS.some((key) => current[key] !== requested[key]);
+}
+
+function browserConfig(config: HostConfig): BrowserConfig {
+  return {
+    chromePath: config.chromePath,
+    userDataDir: config.userDataDir,
+    cdpPort: config.cdpPort,
+    headless: config.headless,
+  };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
  * Start the host daemon: config → chrome → CDP → spaces → Unix socket.
  */
@@ -95,8 +126,7 @@ export async function startDaemon(
   const dataDir = config.dataDir;
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
 
-  const spacesPath =
-    options.spacesPath ?? join(dataDir, "spaces.json");
+  const spacesPath = options.spacesPath ?? join(dataDir, "spaces.json");
   const pidPath = options.pidPath ?? join(dataDir, "host.pid");
   const socketPath = config.hostSocket;
 
@@ -105,6 +135,8 @@ export async function startDaemon(
 
   const ensureChromeFn = options.ensureChrome ?? ensureChrome;
   const connectCdpFn = options.connectCdp ?? connectCdp;
+  const browserShutdownTimeoutMs =
+    options.browserShutdownTimeoutMs ?? BROWSER_SHUTDOWN_TIMEOUT_MS;
 
   let chrome: ChromeHandle | null = null;
   let cdp: CdpBridge | null = null;
@@ -208,6 +240,108 @@ export async function startDaemon(
     detachForward = runtime.attachCdpForwarding();
   }
 
+  async function closeCdpBridge(): Promise<void> {
+    if (detachForward) {
+      detachForward();
+      detachForward = undefined;
+    }
+    if (cdp) {
+      try {
+        await cdp.close();
+      } catch {
+        // Ignore transport errors while disconnecting a bridge.
+      }
+      cdp = null;
+    }
+  }
+
+  async function shutdownBrowser(): Promise<void> {
+    const previousChrome = chrome;
+    const previousCdp = cdp;
+    if (detachForward) {
+      detachForward();
+      detachForward = undefined;
+    }
+
+    try {
+      if (previousChrome && previousChrome.pid > 0) {
+        await previousChrome.kill();
+      } else if (previousCdp) {
+        let closeError: unknown;
+        try {
+          void previousCdp.send("Browser.close").catch((err) => {
+            // The transport normally drops before Browser.close can reply.
+            closeError = err;
+          });
+        } catch (err) {
+          closeError = err;
+        }
+
+        const port = previousChrome?.cdpPort ?? config.cdpPort;
+        const deadline = Date.now() + browserShutdownTimeoutMs;
+        while (await isCdpUp(port)) {
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) {
+            const detail = closeError
+              ? `: ${closeError instanceof Error ? closeError.message : String(closeError)}`
+              : "";
+            throw makeEgoError(
+              "EGO_BROWSER_UNAVAILABLE",
+              `Attached browser did not stop within ${browserShutdownTimeoutMs}ms${detail}`,
+            );
+          }
+          await sleep(Math.min(BROWSER_SHUTDOWN_POLL_MS, remaining));
+        }
+      }
+    } finally {
+      if (previousCdp) {
+        try {
+          await previousCdp.close();
+        } catch {
+          // Browser shutdown can close the transport before the bridge does.
+        }
+      }
+      chrome = null;
+      cdp = null;
+    }
+  }
+
+  function throwReloadBrowserUnavailable(err: unknown): never {
+    const code =
+      err &&
+      typeof err === "object" &&
+      typeof (err as { error_code?: string }).error_code === "string"
+        ? (err as { error_code: string }).error_code
+        : undefined;
+    if (code === "EGO_BROWSER_UNAVAILABLE") throw err;
+    const message =
+      err instanceof Error
+        ? err.message
+        : typeof err === "string"
+          ? err
+          : String(err);
+    throw makeEgoError(
+      "EGO_BROWSER_UNAVAILABLE",
+      `Browser/CDP unavailable after reload: ${message}`,
+    );
+  }
+
+  async function reconnectBrowser(): Promise<void> {
+    await closeCdpBridge();
+    if (options.skipChrome) return;
+
+    try {
+      if (!(await isCdpUp(config.cdpPort))) {
+        chrome = await ensureChromeFn(config);
+      }
+      cdp = await connectCdpFn(config.cdpPort);
+      detachForward = runtime.attachCdpForwarding();
+      chromeStartupError = null;
+    } catch (err) {
+      throwReloadBrowserUnavailable(err);
+    }
+  }
+
   /**
    * If Chrome/CDP died, respawn via ensureChrome and reconnect the bridge.
    * Ego methods call this so a dead browser surfaces as a clear
@@ -220,18 +354,7 @@ export async function startDaemon(
       return;
     }
 
-    if (detachForward) {
-      detachForward();
-      detachForward = undefined;
-    }
-    if (cdp) {
-      try {
-        await cdp.close();
-      } catch {
-        // ignore
-      }
-      cdp = null;
-    }
+    await closeCdpBridge();
 
     try {
       // ensureChrome attaches if CDP is already back, otherwise respawns Chrome.
@@ -261,11 +384,20 @@ export async function startDaemon(
   }
 
   const clients = new Set<Socket>();
+  let lifecycleTail: Promise<void> = Promise.resolve();
 
-  async function handleRequest(
-    method: string,
-    params: any,
-  ): Promise<any> {
+  function serializeBrowserLifecycle<T>(
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const result = lifecycleTail.then(operation, operation);
+    lifecycleTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  async function handleRequest(method: string, params: any): Promise<any> {
     if (method === "ping") {
       return { ok: true, version: HOST_VERSION };
     }
@@ -279,45 +411,43 @@ export async function startDaemon(
       );
     }
     if (method === "reload") {
-      // Drop CDP and reconnect; respawn Chrome if CDP is down.
-      if (detachForward) {
-        detachForward();
-        detachForward = undefined;
+      const requestedConfig = params?.config as HostConfig | undefined;
+      if (!requestedConfig || !browserConfigChanged(config, requestedConfig)) {
+        await reconnectBrowser();
+        return { ok: true };
       }
-      if (cdp) {
+
+      const previousBrowserConfig = browserConfig(config);
+      let newChrome: ChromeHandle | null = null;
+      try {
+        await shutdownBrowser();
+        newChrome = await ensureChromeFn(requestedConfig);
+        chrome = newChrome;
+        cdp = await connectCdpFn(requestedConfig.cdpPort);
+        detachForward = runtime.attachCdpForwarding();
+        Object.assign(config, browserConfig(requestedConfig));
+        chromeStartupError = null;
+      } catch (err) {
+        if (detachForward) {
+          detachForward();
+          detachForward = undefined;
+        }
         try {
-          await cdp.close();
+          await cdp?.close();
         } catch {
-          // ignore
+          // Ignore a partially connected bridge.
         }
         cdp = null;
-      }
-      if (!options.skipChrome) {
-        try {
-          if (!(await isCdpUp(config.cdpPort))) {
-            chrome = await ensureChromeFn(config);
+        if (newChrome) {
+          try {
+            await newChrome.kill();
+          } catch {
+            // Preserve the original startup error.
           }
-          cdp = await connectCdpFn(config.cdpPort);
-          detachForward = runtime.attachCdpForwarding();
-        } catch (err) {
-          const code =
-            err &&
-            typeof err === "object" &&
-            typeof (err as { error_code?: string }).error_code === "string"
-              ? (err as { error_code: string }).error_code
-              : undefined;
-          if (code === "EGO_BROWSER_UNAVAILABLE") throw err;
-          const message =
-            err instanceof Error
-              ? err.message
-              : typeof err === "string"
-                ? err
-                : String(err);
-          throw makeEgoError(
-            "EGO_BROWSER_UNAVAILABLE",
-            `Browser/CDP unavailable after reload: ${message}`,
-          );
         }
+        chrome = null;
+        Object.assign(config, previousBrowserConfig);
+        throwReloadBrowserUnavailable(err);
       }
       return { ok: true };
     }
@@ -332,10 +462,7 @@ export async function startDaemon(
       }
       return result;
     }
-    throw makeEgoError(
-      "EGO_INVALID_ARGUMENT",
-      `unknown RPC method: ${method}`,
-    );
+    throw makeEgoError("EGO_INVALID_ARGUMENT", `unknown RPC method: ${method}`);
   }
 
   function writeToClient(socket: Socket, text: string): void {
@@ -375,7 +502,12 @@ export async function startDaemon(
               return;
             }
             id = msg.id;
-            const result = await handleRequest(msg.method, msg.params);
+            const result =
+              msg.method === "reload" || msg.method.startsWith("ego.")
+                ? await serializeBrowserLifecycle(() =>
+                    handleRequest(msg.method, msg.params),
+                  )
+                : await handleRequest(msg.method, msg.params);
             writeToClient(socket, encodeResponse({ id, result }));
           } catch (err) {
             if (id >= 0) {
