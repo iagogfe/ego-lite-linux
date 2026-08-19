@@ -32,6 +32,8 @@ export type ChromeHandle = {
   pid: number;
   cdpPort: number;
   userDataDir: string;
+  /** Binary actually in use; null when we attached to a Chrome we did not spawn. */
+  path: string | null;
   kill(): Promise<void>;
 };
 
@@ -142,6 +144,7 @@ function makeHandle(
   pid: number,
   cdpPort: number,
   userDataDir: string,
+  path: string | null,
   child?: ChildProcess,
 ): ChromeHandle {
   let killed = false;
@@ -149,6 +152,7 @@ function makeHandle(
     pid,
     cdpPort,
     userDataDir,
+    path,
     async kill() {
       if (killed) return;
       killed = true;
@@ -175,7 +179,7 @@ export async function ensureChrome(
 ): Promise<ChromeHandle> {
   if (await isCdpUp(config.cdpPort)) {
     // Attached mode: we did not spawn; pid unknown (0). kill is best-effort no-op on 0.
-    return makeHandle(0, config.cdpPort, config.userDataDir);
+    return makeHandle(0, config.cdpPort, config.userDataDir, null);
   }
 
   const chromePath = resolveChromePath(process.env, config.chromePath, {
@@ -226,7 +230,13 @@ export async function ensureChrome(
   }
 
   const pid = child.pid;
-  const handle = makeHandle(pid, config.cdpPort, config.userDataDir, child);
+  const handle = makeHandle(
+    pid,
+    config.cdpPort,
+    config.userDataDir,
+    chromePath,
+    child,
+  );
 
   const deadline = Date.now() + CDP_READY_TIMEOUT_MS;
   while (Date.now() < deadline) {

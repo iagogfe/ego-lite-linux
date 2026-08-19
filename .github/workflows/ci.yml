@@ -125,11 +125,13 @@ jobs:
         run: |
           export PATH="$HOME/.local/bin:$PATH"
           ego-browser --doctor | tee doctor.json
-          # sem Chrome resolvido o e2e falharia adiante com erro pior de ler
+          # o que decide se o e2e pode rodar e o CDP responder, nao o caminho
+          # configurado: o host tambem resolve o binario sozinho pelo PATH.
           node -e '
             const d = require("./doctor.json");
-            if (!d.chromePath) { console.error("::error::doctor nao resolveu o Chrome"); process.exit(1) }
             if (d.chromeError) { console.error("::error::" + d.chromeError); process.exit(1) }
+            if (!d.cdpUp) { console.error("::error::CDP nao respondeu na porta " + d.cdpPort); process.exit(1) }
+            console.log("chrome:", d.chromePath ?? "(resolvido no PATH)", "| pid:", d.chromePid);
           '
 
       - name: Smoke ponta a ponta (example.com)

@@ -484,7 +484,10 @@ async function buildDoctor(
   return {
     ok: true,
     version: HOST_VERSION,
-    chromePath: config.chromePath,
+    // O binario em uso, nao so o configurado: quando o host resolve o Chrome
+    // pelo PATH, config.chromePath fica null e o doctor dizia "sem Chrome"
+    // com o browser rodando ao lado.
+    chromePath: chrome?.path ?? config.chromePath,
     chromeRunning,
     chromePid,
     // Why the browser is missing, when it is. Null when Chrome came up.
