@@ -161,7 +161,9 @@ export class SpaceManager {
   }
 
   /** Public records without targetIds (ego listTaskSpaces shape). */
-  listPublic(): Array<Omit<Space, "targetIds"> & { recentTabTitles?: string[] }> {
+  listPublic(): Array<
+    Omit<Space, "targetIds"> & { recentTabTitles?: string[] }
+  > {
     return this.spaces.map((s) => {
       const { targetIds: _t, ...rest } = s;
       return {

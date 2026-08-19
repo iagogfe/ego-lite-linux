@@ -90,7 +90,13 @@ test("assignTarget moves tab between spaces", () => {
   assert.equal(sm.spaceIdForTarget("shared"), a.id);
   sm.assignTarget("shared", b.id);
   assert.equal(sm.spaceIdForTarget("shared"), b.id);
-  assert.equal(sm.list().find((s) => s.id === a.id)?.targetIds.includes("shared"), false);
+  assert.equal(
+    sm
+      .list()
+      .find((s) => s.id === a.id)
+      ?.targetIds.includes("shared"),
+    false,
+  );
 });
 
 test("adoptOrphanTargets puts unknowns on user space", () => {
@@ -111,7 +117,10 @@ test("closeSelected returns targetIds and removes agent space", () => {
   sm.assignTarget("c2");
   const closed = sm.closeSelected();
   assert.deepEqual(closed.sort(), ["c1", "c2"]);
-  assert.equal(sm.list().find((s) => s.id === a.id), undefined);
+  assert.equal(
+    sm.list().find((s) => s.id === a.id),
+    undefined,
+  );
   assert.equal(sm.selected(), null);
 });
 
