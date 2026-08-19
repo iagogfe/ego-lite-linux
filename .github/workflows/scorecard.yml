@@ -22,6 +22,10 @@ permissions: read-all
 jobs:
   analise:
     name: Analise do Scorecard
+    # O Scorecard so consegue ler a API publica do OpenSSF; em repo privado ele
+    # falha em ListCommits. Nao e check obrigatorio, entao pular o job inteiro
+    # nao trava merge nenhum.
+    if: github.event.repository.visibility == 'public'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

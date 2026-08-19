@@ -101,4 +101,10 @@ jobs:
         with:
           languages: javascript-typescript
           queries: security-and-quality
+      # A analise roda sempre — o check e obrigatorio na main e um job pulado
+      # deixaria o PR esperando por um check que nunca chega. So o upload do
+      # SARIF depende de ser publico: code scanning nao existe em repo privado
+      # sem GHAS, e era isso que fazia este job falhar antes da publicacao.
       - uses: github/codeql-action/analyze@e60ea984bd3baa95954f2856bcf24f9eaba46637 # v3
+        with:
+          upload: ${{ github.event.repository.visibility == 'public' && 'always' || 'never' }}
