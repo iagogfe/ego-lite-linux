@@ -149,7 +149,9 @@ export class SpaceManager {
       selectedId: this.selectedId,
       spaces: this.spaces.map(cloneSpace),
     };
-    await mkdir(dirname(this.persistPath), { recursive: true });
+    // 0700 como o daemon faz no dataDir: spaces.json guarda os tabsets do
+    // usuario, e quem criar o diretorio primeiro nao pode deixa-lo mais aberto.
+    await mkdir(dirname(this.persistPath), { recursive: true, mode: 0o700 });
     await writeFile(this.persistPath, JSON.stringify(payload, null, 2), "utf8");
   }
 
