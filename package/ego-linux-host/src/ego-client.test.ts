@@ -130,12 +130,26 @@ test("installEgoClient sendCDPMessage proxies payload; events wire callbacks", a
   ]);
 });
 
-test("installEgoClient exposes no-op optional APIs", async () => {
+test("installEgoClient forwards overlay APIs fire-and-forget", async () => {
   const conn = mockConn();
   installEgoClient(conn);
   const ego = (globalThis as any).ego;
-  assert.equal(typeof ego.animationHighlightMouseToPosition, "function");
-  assert.equal(typeof ego.setAgentTaskState, "function");
+  await ego.animationHighlightMouseToPosition(1, 2);
+  await ego.setAgentTaskState("working");
+  assert.deepEqual(conn.calls, [
+    ["ego.animationHighlightMouseToPosition", { x: 1, y: 2 }],
+    ["ego.setAgentTaskState", { label: "working" }],
+  ]);
+});
+
+test("installEgoClient overlay APIs swallow request errors", async () => {
+  const conn = mockConn({
+    async request() {
+      throw new Error("daemon down");
+    },
+  });
+  installEgoClient(conn);
+  const ego = (globalThis as any).ego;
   await ego.animationHighlightMouseToPosition(1, 2);
   await ego.setAgentTaskState("working");
 });
