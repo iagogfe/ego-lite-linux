@@ -78,13 +78,13 @@ Without Chrome + display, skip the smoke script; unit/integration tests still pa
 
 ## Path defaults
 
-| Helper | Env override | Default |
-|--------|--------------|---------|
-| `defaultDataDir()` | `EGO_DATA_DIR` | `$XDG_DATA_HOME/ego-lite` or `~/.local/share/ego-lite` |
-| `defaultConfigDir()` | `EGO_CONFIG_DIR` | `$XDG_CONFIG_HOME/ego-lite` or `~/.config/ego-lite` |
-| `defaultProfileDir()` | `EGO_USER_DATA_DIR` | `<dataDir>/profile` |
-| `defaultSocketPath()` | `EGO_HOST_SOCK` | `<dataDir>/host.sock` |
-| `defaultCdpPort()` | `EGO_CDP_PORT` | `9222` |
+| Helper                | Env override        | Default                                                |
+| --------------------- | ------------------- | ------------------------------------------------------ |
+| `defaultDataDir()`    | `EGO_DATA_DIR`      | `$XDG_DATA_HOME/ego-lite` or `~/.local/share/ego-lite` |
+| `defaultConfigDir()`  | `EGO_CONFIG_DIR`    | `$XDG_CONFIG_HOME/ego-lite` or `~/.config/ego-lite`    |
+| `defaultProfileDir()` | `EGO_USER_DATA_DIR` | `<dataDir>/profile`                                    |
+| `defaultSocketPath()` | `EGO_HOST_SOCK`     | `<dataDir>/host.sock`                                  |
+| `defaultCdpPort()`    | `EGO_CDP_PORT`      | `9222`                                                 |
 
 ## Diagnostics (`ego-browser --doctor`)
 
