@@ -468,6 +468,7 @@ test("reload with unchanged browser config reconnects without restarting Chrome"
           pid: 42,
           cdpPort: config.cdpPort,
           userDataDir: config.userDataDir,
+          path: "/usr/bin/google-chrome",
           async kill() {
             killCount++;
           },
@@ -502,6 +503,7 @@ test("reload with changed browser config replaces Chrome and commits the new con
           pid: 42,
           cdpPort: received.cdpPort,
           userDataDir: received.userDataDir,
+          path: "/usr/bin/google-chrome",
           async kill() {
             killCount++;
           },
@@ -542,6 +544,7 @@ test("reload failure keeps the previous browser config", async () => {
           pid: 42,
           cdpPort: config.cdpPort,
           userDataDir: config.userDataDir,
+          path: "/usr/bin/google-chrome",
           async kill() {},
         };
       },
@@ -577,6 +580,7 @@ test("reload rejects when attached browser shutdown leaves the old CDP endpoint 
           pid: 0,
           cdpPort: config.cdpPort,
           userDataDir: config.userDataDir,
+          path: "/usr/bin/google-chrome",
           async kill() {},
         };
       },
@@ -631,6 +635,7 @@ test("reload waits for delayed attached browser shutdown before ensuring replace
           pid: ensureCount === 1 ? 0 : 42,
           cdpPort: received.cdpPort,
           userDataDir: received.userDataDir,
+          path: "/usr/bin/google-chrome",
           async kill() {},
         };
       },
@@ -683,6 +688,7 @@ test("reload serializes an ego request until the new browser lifecycle is ready"
           pid: ensureCount === 1 ? 42 : 43,
           cdpPort: received.cdpPort,
           userDataDir: received.userDataDir,
+          path: "/usr/bin/google-chrome",
           async kill() {
             killStarted.resolve();
             await releaseKill.promise;
@@ -763,6 +769,7 @@ test("successful reload commits only browser launch configuration", async () => 
         pid: 42,
         cdpPort: received.cdpPort,
         userDataDir: received.userDataDir,
+        path: "/usr/bin/google-chrome",
         async kill() {},
       }),
       connectCdp: async () => fakeCdp(),
