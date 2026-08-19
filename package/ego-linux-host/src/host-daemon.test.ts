@@ -6,12 +6,7 @@ import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { startDaemon, HOST_VERSION } from "./host-daemon.js";
-import {
-  decodeLine,
-  encodeRequest,
-  isRpcResponse,
-  LineBuffer,
-} from "./rpc.js";
+import { decodeLine, encodeRequest, isRpcResponse, LineBuffer } from "./rpc.js";
 import type { HostConfig } from "./config.js";
 import type { CdpBridge } from "./cdp-bridge.js";
 
@@ -601,7 +596,11 @@ test("reload rejects when attached browser shutdown leaves the old CDP endpoint 
         (err: any) => err.error_code === "EGO_BROWSER_UNAVAILABLE",
       );
       assert.equal(closeRequests, 1);
-      assert.equal(ensureCount, 1, "must not attach to the still-live old endpoint");
+      assert.equal(
+        ensureCount,
+        1,
+        "must not attach to the still-live old endpoint",
+      );
       assert.equal(daemon.config.headless, true);
     } finally {
       await daemon.close();
@@ -732,7 +731,11 @@ test("reload serializes an ego request until the new browser lifecycle is ready"
         egoPromise,
       ]);
 
-      assert.equal(interleaved, false, "ego request used the bridge being replaced");
+      assert.equal(
+        interleaved,
+        false,
+        "ego request used the bridge being replaced",
+      );
       assert.deepEqual(reloadResult, { ok: true });
       assert.deepEqual(tabs, { tabs: [] });
       assert.equal(oldListCalls, 1, "only startup may use the old bridge");

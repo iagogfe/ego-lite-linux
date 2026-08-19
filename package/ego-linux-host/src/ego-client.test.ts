@@ -59,7 +59,10 @@ test("runCli sends the effective config with reload", async () => {
 function mockConn(handler?: {
   request?: (method: string, params?: any) => Promise<any>;
   events?: Array<(event: string, params?: any) => void>;
-}): HostConnection & { emit: (event: string, params?: any) => void; calls: any[] } {
+}): HostConnection & {
+  emit: (event: string, params?: any) => void;
+  calls: any[];
+} {
   const calls: any[] = [];
   const listeners = new Set<(event: string, params?: any) => void>();
   return {
@@ -95,7 +98,8 @@ test("installEgoClient maps createTab(url) and createTaskSpace(name)", async () 
   const conn = mockConn({
     async request(method, params) {
       if (method === "ego.createTab") return { targetId: "t1" };
-      if (method === "ego.createTaskSpace") return { id: 2, name: params?.name };
+      if (method === "ego.createTaskSpace")
+        return { id: 2, name: params?.name };
       return {};
     },
   });

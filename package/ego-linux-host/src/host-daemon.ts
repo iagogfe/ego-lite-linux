@@ -41,10 +41,7 @@ const BROWSER_CONFIG_KEYS = [
   "headless",
 ] as const;
 
-type BrowserConfig = Pick<
-  HostConfig,
-  (typeof BROWSER_CONFIG_KEYS)[number]
->;
+type BrowserConfig = Pick<HostConfig, (typeof BROWSER_CONFIG_KEYS)[number]>;
 
 export type HostDaemonOptions = {
   config?: HostConfig;
@@ -73,10 +70,7 @@ export type HostDaemon = {
   close(): Promise<void>;
 };
 
-function errorToRpc(
-  id: number,
-  err: unknown,
-): RpcResponse {
+function errorToRpc(id: number, err: unknown): RpcResponse {
   const code =
     err &&
     typeof err === "object" &&
@@ -132,8 +126,7 @@ export async function startDaemon(
   const dataDir = config.dataDir;
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
 
-  const spacesPath =
-    options.spacesPath ?? join(dataDir, "spaces.json");
+  const spacesPath = options.spacesPath ?? join(dataDir, "spaces.json");
   const pidPath = options.pidPath ?? join(dataDir, "host.pid");
   const socketPath = config.hostSocket;
 
@@ -404,10 +397,7 @@ export async function startDaemon(
     return result;
   }
 
-  async function handleRequest(
-    method: string,
-    params: any,
-  ): Promise<any> {
+  async function handleRequest(method: string, params: any): Promise<any> {
     if (method === "ping") {
       return { ok: true, version: HOST_VERSION };
     }
@@ -472,10 +462,7 @@ export async function startDaemon(
       }
       return result;
     }
-    throw makeEgoError(
-      "EGO_INVALID_ARGUMENT",
-      `unknown RPC method: ${method}`,
-    );
+    throw makeEgoError("EGO_INVALID_ARGUMENT", `unknown RPC method: ${method}`);
   }
 
   function writeToClient(socket: Socket, text: string): void {

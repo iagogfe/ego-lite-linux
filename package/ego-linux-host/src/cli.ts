@@ -128,7 +128,9 @@ export function resolveHarnessPath(
 }
 
 /** Default skills workspace relative to monorepo root. */
-export function defaultAgentWorkspace(packageRoot: string = PACKAGE_ROOT): string {
+export function defaultAgentWorkspace(
+  packageRoot: string = PACKAGE_ROOT,
+): string {
   return join(packageRoot, "..", "..", "skills", "ego-browser");
 }
 
