@@ -38,6 +38,7 @@ export function navigationCase() {
     assertEqual(byPath.reused, true, "openOrReuseTab reuses by origin and path");
 
     const unique = await browser.openOrReuseTab(baseUrl + "/secondary?unique=" + Date.now(), {
+      match: "exact",
       wait: false,
     });
     assertEqual(unique.reused, false, "openOrReuseTab opens a unique exact URL");

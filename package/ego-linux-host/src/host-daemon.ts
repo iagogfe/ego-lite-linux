@@ -132,6 +132,10 @@ export async function startDaemon(
 
   const spaceManager = new SpaceManager(spacesPath);
   await spaceManager.load();
+  // A daemon restart starts a fresh agent invocation. The task spaces remain
+  // available by name/id, but an abandoned selection must not become active
+  // before the new invocation explicitly chooses one.
+  spaceManager.clearSelection();
 
   const ensureChromeFn = options.ensureChrome ?? ensureChrome;
   const connectCdpFn = options.connectCdp ?? connectCdp;
@@ -149,6 +153,7 @@ export async function startDaemon(
       // Adopt orphan page targets into user space
       try {
         const pages = await cdp.listPageTargets();
+        spaceManager.reconcileTargets(pages.map((p) => p.targetId));
         spaceManager.adoptOrphanTargets(pages.map((p) => p.targetId));
         await spaceManager.save();
       } catch {

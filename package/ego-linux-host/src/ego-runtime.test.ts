@@ -138,8 +138,18 @@ test("snapshot works for agent-owned space", async () => {
 test("listTabs filters to selected space only", async () => {
   const { sm, fakeCdp, runtime } = setup({
     targets: [
-      { targetId: "user-tab", title: "User", url: "https://u.example", type: "page" },
-      { targetId: "agent-tab", title: "Agent", url: "https://a.example", type: "page" },
+      {
+        targetId: "user-tab",
+        title: "User",
+        url: "https://u.example",
+        type: "page",
+      },
+      {
+        targetId: "agent-tab",
+        title: "Agent",
+        url: "https://a.example",
+        type: "page",
+      },
     ],
   });
   sm.adoptOrphanTargets(["user-tab"]);
@@ -171,6 +181,77 @@ test("listTabs returns empty for agent space with no tabs (not user tabs)", asyn
 
   const result = await runtime.handle("listTabs", {});
   assert.deepEqual(result.tabs, []);
+});
+
+test("findReusableTab moves a matching tab from another agent space", async () => {
+  const { sm, fakeCdp, runtime } = setup({
+    targets: [
+      {
+        targetId: "old-agent-tab",
+        title: "Old Example",
+        url: "https://example.com/previous",
+        type: "page",
+      },
+      {
+        targetId: "user-tab",
+        title: "User Example",
+        url: "https://example.com/user",
+        type: "page",
+      },
+    ],
+  });
+  sm.adoptOrphanTargets(["user-tab"]);
+  const oldSpace = sm.createAgentSpace("old-job");
+  sm.assignTarget("old-agent-tab", oldSpace.id);
+  const currentSpace = sm.createAgentSpace("current-job");
+  sm.use(currentSpace.id);
+
+  const result = await runtime.handle("findReusableTab", {
+    url: "https://example.com/current",
+    match: "origin",
+  });
+
+  assert.deepEqual(result, {
+    targetId: "old-agent-tab",
+    title: "Old Example",
+    url: "https://example.com/previous",
+  });
+  assert.deepEqual(sm.targetsForSelected(), ["old-agent-tab"]);
+  assert.deepEqual(
+    sm.list().find((space) => space.id === oldSpace.id)?.targetIds,
+    [],
+  );
+  assert.deepEqual(sm.list().find((space) => space.id === 1)?.targetIds, [
+    "user-tab",
+  ]);
+  void fakeCdp;
+});
+
+test("findReusableTab ignores handed-off tabs", async () => {
+  const { sm, runtime } = setup({
+    targets: [
+      {
+        targetId: "handed-off-tab",
+        title: "Example",
+        url: "https://example.com/previous",
+        type: "page",
+      },
+    ],
+  });
+  const handedOff = sm.createAgentSpace("handed-off");
+  sm.assignTarget("handed-off-tab", handedOff.id);
+  sm.use(handedOff.id);
+  sm.handOff();
+  const current = sm.createAgentSpace("current");
+  sm.use(current.id);
+
+  const result = await runtime.handle("findReusableTab", {
+    url: "https://example.com/current",
+    match: "origin",
+  });
+
+  assert.equal(result, null);
+  assert.deepEqual(sm.targetsForSelected(), []);
 });
 
 test("createTab creates target and assigns to selected space", async () => {
@@ -324,10 +405,7 @@ test("attachCdpForwarding pushes cdp.message events", async () => {
   fakeCdp.deliverMessage({ id: 9, result: { value: 1 } });
   assert.equal(events.length, 1);
   assert.equal(events[0].event, "cdp.message");
-  assert.equal(
-    JSON.parse(events[0].params.payload).result.value,
-    1,
-  );
+  assert.equal(JSON.parse(events[0].params.payload).result.value, 1);
 });
 
 test("handle accepts ego. prefix methods", async () => {
@@ -571,8 +649,14 @@ test("sem atividade, o overlay cai para o estado parado", async () => {
     payload: '{"id":1,"method":"Page.navigate","params":{"url":"about:blank"}}',
   });
   await new Promise((r) => setTimeout(r, 10));
-  assert.equal(evaluates.filter((e) => e.includes('setState("idle"')).length, 0);
+  assert.equal(
+    evaluates.filter((e) => e.includes('setState("idle"')).length,
+    0,
+  );
 
   await new Promise((r) => setTimeout(r, 60));
-  assert.equal(evaluates.filter((e) => e.includes('setState("idle"')).length, 1);
+  assert.equal(
+    evaluates.filter((e) => e.includes('setState("idle"')).length,
+    1,
+  );
 });

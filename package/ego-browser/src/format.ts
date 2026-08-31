@@ -598,7 +598,8 @@ const FUNCTION_DOCS: Record<string, FunctionDoc> = {
   },
   "browser.openOrReuseTab": {
     signature: "browser.openOrReuseTab(url, options?) => Promise<object>",
-    description: "Open a URL in a new or reusable tab, then select it.",
+    description:
+      "Reuse the first agent tab from the same origin (the default) or open a new tab, then select it.",
     params: [
       {
         name: "url",
@@ -608,8 +609,9 @@ const FUNCTION_DOCS: Record<string, FunctionDoc> = {
       },
       {
         name: "options",
-        type: "{ wait?: boolean, timeout?: number, settle?: number }",
-        description: "Open and wait options.",
+        type: '{ match?: "exact"|"origin"|"origin+path"|"includes", wait?: boolean, timeout?: number, settle?: number }',
+        description:
+          "URL matching and open/wait options. Use match:'exact' when separate URLs on the same site need separate tabs.",
       },
     ],
     returns: "Promise<object>",

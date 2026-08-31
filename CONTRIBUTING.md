@@ -70,7 +70,8 @@ ego-lite/
 │   └── learnings/<site>/       # Per-site knowledge packs (github / google / x-com ...)
 ├── spec/                       # Spec references
 ├── public/                     # Demo assets
-├── .github/workflows/ci.yml    # CI (test + release)
+├── .github/workflows/ci.yml    # CI (testes e validacoes)
+├── .github/workflows/release.yml # Releases com notas geradas pelo GitHub
 ├── .claude-plugin/             # Claude Code plugin marketplace manifest
 ├── AGENTS.md                   # Repo-level agent / contributor guidance
 └── README.md
@@ -320,7 +321,8 @@ Add at least one release-note label so generated releases are grouped correctly:
   - `package/ego-browser`: `npm ci` → `npm test` → `npm run validate:site-skills`
   - `package/ego-linux-host`: `npm ci` → `npm test` (build + typecheck + `node --test`, Chrome-free)
 - `.github/workflows/quality-gates.yml` adds prettier, `npm audit`, and typecheck for `package/ego-browser` changes.
-- This fork publishes no releases and no packages. Tagged releases of `ego-browser` come from upstream; the release and skill-publishing workflows were removed here on purpose.
+- `.github/workflows/release.yml` creates a GitHub Release for `vX.Y.Z` tags with notes grouped by `.github/release.yml`; the release notes are the generated changelog for that version.
+- `CHANGELOG.md` keeps the current unreleased notes. This fork publishes no npm packages.
 - The build script `scripts/build.mjs` uses `.build.lock` to prevent concurrent builds.
 
 ---
