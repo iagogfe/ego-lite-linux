@@ -116,10 +116,6 @@ export async function runRealBrowserE2e() {
     }
   }
 
-  async function maybeRunNodeBridgeSmoke() {
-    await runNodeBridgeSmoke();
-  }
-
   async function runEgoCase(name, body, timeoutMs = 45000, options = {}) {
     const visible = options.visible !== false;
     if (visible) console.log(`-- ${name}`);
@@ -177,7 +173,6 @@ export async function runRealBrowserE2e() {
   }
 
   async function cleanupTaskSpace() {
-    const beforeFails = caseResults.filter((r) => r.status === "fail").length;
     await runEgoCase(
       "cleanup",
       `
@@ -243,7 +238,7 @@ export async function runRealBrowserE2e() {
     console.log(`task: ${taskName}`);
     console.log(`sdk: ${egoBrowserSdkPath}`);
 
-    await maybeRunNodeBridgeSmoke();
+    await runNodeBridgeSmoke();
     if (
       caseResults.some(
         (r) => r.name === "nodejs bridge smoke" && r.status === "fail",
@@ -360,10 +355,6 @@ function parseNodeBridgeSmoke(stdout, marker) {
 
 function caseResultPath(tempDir) {
   return join(tempDir, "case-result.json");
-}
-
-async function readCaseAssertionCount(tempDir, stdout) {
-  return (await readCaseResult(tempDir, stdout)).assertions;
 }
 
 async function readCaseResult(tempDir, stdout) {

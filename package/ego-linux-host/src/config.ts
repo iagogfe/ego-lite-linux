@@ -15,7 +15,6 @@ export type HostConfig = {
   headless: boolean;
   hostSocket: string;
   dataDir: string;
-  seedFromChrome: boolean;
 };
 
 /** Optional fields from ~/.config/ego-lite/config.json */
@@ -24,7 +23,6 @@ type FileConfig = {
   userDataDir?: string;
   cdpPort?: number;
   headless?: boolean;
-  seedFromChrome?: boolean;
   hostSocket?: string;
 };
 
@@ -107,8 +105,6 @@ export async function loadConfig(
     hostSocket = defaultSocketPath(env);
   }
 
-  const seedFromChrome = file.seedFromChrome ?? false;
-
   return {
     chromePath,
     userDataDir,
@@ -116,6 +112,5 @@ export async function loadConfig(
     headless,
     hostSocket,
     dataDir,
-    seedFromChrome,
   };
 }

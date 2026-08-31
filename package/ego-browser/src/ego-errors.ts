@@ -127,11 +127,6 @@ function isEgoHardStopCode(code: string | undefined): boolean {
   );
 }
 
-/** Whether an ego error is a hard stop the agent must not retry or route around. */
-export function isEgoHardStopError(err: unknown): boolean {
-  return isEgoHardStopCode(egoErrorCode(err));
-}
-
 /**
  * Build an Error carrying the resolved message and stable error_code from any ego
  * error shape. `op`, when given, prefixes the message with the failing operation.

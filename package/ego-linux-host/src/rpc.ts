@@ -20,25 +20,11 @@ export function encodeLine(msg: object): string {
   return JSON.stringify(msg) + "\n";
 }
 
-export function encodeRequest(req: RpcRequest): string {
-  return encodeLine(req);
-}
-
-export function encodeResponse(res: RpcResponse): string {
-  return encodeLine(res);
-}
-
-export function encodeEvent(ev: RpcEvent): string {
-  return encodeLine(ev);
-}
-
 export function isRpcRequest(msg: unknown): msg is RpcRequest {
   if (!msg || typeof msg !== "object") return false;
   const m = msg as Record<string, unknown>;
   return (
-    typeof m.id === "number" &&
-    typeof m.method === "string" &&
-    !("event" in m)
+    typeof m.id === "number" && typeof m.method === "string" && !("event" in m)
   );
 }
 
@@ -114,14 +100,5 @@ export class LineBuffer {
       if (line.length > 0) lines.push(line);
     }
     return lines;
-  }
-
-  /** Leftover bytes without a trailing newline (for diagnostics). */
-  pending(): string {
-    return this.buffer;
-  }
-
-  clear(): void {
-    this.buffer = "";
   }
 }

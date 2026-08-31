@@ -7,14 +7,12 @@ export function observationCase() {
     assertIncludes(raw.content || "", "Helper e2e fixture", "snapshotRaw contains fixture content");
 
     const compactRaw = await page.snapshotRaw({
-      scope: "only_within_viewport",
       includeActionMarks: false,
       includeStableLocator: false,
     });
-    assertIncludes(compactRaw.content || "", "Helper e2e fixture", "snapshotRaw accepts compact options");
+    assertIncludes(compactRaw.content || "", "Helper e2e fixture", "snapshotRaw accepts supported options");
 
     const snap = await page.snapshotRaw({
-      scope: "full_page",
       includeActionMarks: true,
       includeStableLocator: true,
     });
@@ -33,11 +31,8 @@ export function observationCase() {
     const namedRefCenter = await page.elementCenter("ref=" + buttonRef);
     assert(Number.isFinite(namedRefCenter.x) && Number.isFinite(namedRefCenter.y), "ref= resolves to coordinates");
 
-    const text = await page.snapshot({ scope: "full_page" });
+    const text = await page.snapshot();
     assertIncludes(text, "Text input", "snapshot returns text content");
-
-    const viewportText = await page.snapshot({ scope: "only_within_viewport" });
-    assertIncludes(viewportText, "Helper e2e fixture", "snapshot supports viewport scope");
 
     const center = await page.elementCenter("#click-button");
     assert(Number.isFinite(center.x) && Number.isFinite(center.y), "elementCenter returns coordinates");
@@ -116,13 +111,13 @@ export function observationCase() {
     console.log(JSON.stringify({ observationStep: "dynamic DOM" }));
     await page.locator("#remove-element").click();
     await page.waitForTimeout(100);
-    const textBefore = await page.snapshot({ scope: "full_page" });
+    const textBefore = await page.snapshot();
     assert(!String(textBefore).includes("Dynamic!"), "snapshot text does not contain dynamic element before creation");
 
     await page.locator("#add-element").click();
     await page.waitForSelector("#dynamic-element", { timeout: 3000, state: "visible" });
     await page.waitForTimeout(200);
-    const textAfter = await page.snapshot({ scope: "full_page" });
+    const textAfter = await page.snapshot();
     assertIncludes(String(textAfter), "Dynamic!", "snapshot text includes dynamically created element");
 
     /* iframe interaction — evaluate JS inside the iframe */

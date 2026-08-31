@@ -112,7 +112,7 @@ npm run typecheck
 npm test
 
 # 5. Validate site learnings
-npm run validate:site-skills    # alias: validate:learnings
+npm run validate:site-skills
 ```
 
 **Calling the CLI directly** (for local debugging):

@@ -9,6 +9,7 @@
 import { createServer, type Server, type Socket } from "node:net";
 import { mkdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { connectCdp, type CdpBridge } from "./cdp-bridge.js";
 import {
   ensureChrome,
@@ -20,8 +21,7 @@ import { createEgoRuntime, type EgoRuntime } from "./ego-runtime.js";
 import { makeEgoError } from "./errors.js";
 import {
   decodeLine,
-  encodeEvent,
-  encodeResponse,
+  encodeLine,
   isRpcRequest,
   LineBuffer,
   type RpcEvent,
@@ -111,10 +111,6 @@ function browserConfig(config: HostConfig): BrowserConfig {
   };
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 /**
  * Start the host daemon: config → chrome → CDP → spaces → Unix socket.
  */
@@ -182,9 +178,6 @@ export async function startDaemon(
           "EGO_CDP_CHANNEL_UNAVAILABLE",
           "CDP not connected (skipChrome)",
         );
-      },
-      onEvent() {
-        return () => {};
       },
       onMessage() {
         return () => {};
@@ -480,7 +473,7 @@ export async function startDaemon(
   }
 
   function broadcastEvent(ev: RpcEvent): void {
-    const line = encodeEvent(ev);
+    const line = encodeLine(ev);
     for (const socket of clients) {
       writeToClient(socket, line);
     }
@@ -513,10 +506,10 @@ export async function startDaemon(
                     handleRequest(msg.method, msg.params),
                   )
                 : await handleRequest(msg.method, msg.params);
-            writeToClient(socket, encodeResponse({ id, result }));
+            writeToClient(socket, encodeLine({ id, result }));
           } catch (err) {
             if (id >= 0) {
-              writeToClient(socket, encodeResponse(errorToRpc(id, err)));
+              writeToClient(socket, encodeLine(errorToRpc(id, err)));
             }
           }
         })();

@@ -9,7 +9,6 @@ type FakeCdp = CdpBridge & {
   rawSent: object[];
   closedTargets: string[];
   messageHandlers: Set<(msg: any) => void>;
-  eventHandlers: Set<(msg: any) => void>;
   deliverMessage(msg: any): void;
 };
 
@@ -20,12 +19,8 @@ function makeFakeCdp(initial: CdpPageTarget[] = []): FakeCdp {
     rawSent: [],
     closedTargets: [],
     messageHandlers: new Set(),
-    eventHandlers: new Set(),
     deliverMessage(msg: any) {
       for (const h of fake.messageHandlers) h(msg);
-      if (msg && typeof msg.method === "string") {
-        for (const h of fake.eventHandlers) h(msg);
-      }
     },
     async send(method: string, params?: object) {
       if (method === "Target.closeTarget") {
@@ -49,10 +44,6 @@ function makeFakeCdp(initial: CdpPageTarget[] = []): FakeCdp {
     },
     sendRaw(payload: object) {
       fake.rawSent.push(payload);
-    },
-    onEvent(handler) {
-      fake.eventHandlers.add(handler);
-      return () => fake.eventHandlers.delete(handler);
     },
     onMessage(handler) {
       fake.messageHandlers.add(handler);

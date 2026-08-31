@@ -5,8 +5,9 @@ import { createConnection } from "node:net";
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { setTimeout as delay } from "node:timers/promises";
 import { startDaemon, HOST_VERSION } from "./host-daemon.js";
-import { decodeLine, encodeRequest, isRpcResponse, LineBuffer } from "./rpc.js";
+import { decodeLine, encodeLine, isRpcResponse, LineBuffer } from "./rpc.js";
 import type { HostConfig } from "./config.js";
 import type { CdpBridge } from "./cdp-bridge.js";
 import { SpaceManager } from "./space-manager.js";
@@ -35,10 +36,6 @@ function deferred<T = void>(): {
   return { promise, resolve };
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function rpcCall(
   socketPath: string,
   method: string,
@@ -54,7 +51,7 @@ function rpcCall(
     }, 5000);
 
     sock.on("connect", () => {
-      sock.write(encodeRequest({ id, method, params }));
+      sock.write(encodeLine({ id, method, params }));
     });
     sock.on("data", (chunk) => {
       for (const line of buf.push(chunk)) {
@@ -95,7 +92,6 @@ function testConfig(dir: string): HostConfig {
     headless: true,
     hostSocket: join(dir, "host.sock"),
     dataDir: dir,
-    seedFromChrome: false,
   };
 }
 
@@ -105,9 +101,6 @@ function fakeCdp(): CdpBridge {
       return {};
     },
     sendRaw() {},
-    onEvent() {
-      return () => {};
-    },
     onMessage() {
       return () => {};
     },
@@ -325,9 +318,6 @@ test("daemon respawns Chrome via ensureChrome when CDP is down on ego method", a
           return {};
         },
         sendRaw() {},
-        onEvent() {
-          return () => {};
-        },
         onMessage() {
           return () => {};
         },
@@ -386,9 +376,6 @@ test("daemon throws EGO_BROWSER_UNAVAILABLE when ensureChrome fails on ego metho
           return {};
         },
         sendRaw() {},
-        onEvent() {
-          return () => {};
-        },
         onMessage() {
           return () => {};
         },
@@ -437,9 +424,6 @@ test("doctor reporta o binario em uso, nao so o configurado", async () => {
           return {};
         },
         sendRaw() {},
-        onEvent() {
-          return () => {};
-        },
         onMessage() {
           return () => {};
         },
@@ -818,14 +802,12 @@ test("successful reload commits only browser launch configuration", async () => 
     const originalMetadata = {
       hostSocket: config.hostSocket,
       dataDir: config.dataDir,
-      seedFromChrome: config.seedFromChrome,
     };
     const requested: HostConfig = {
       ...config,
       headless: false,
       hostSocket: join(dir, "ignored-host.sock"),
       dataDir: join(dir, "ignored-data"),
-      seedFromChrome: true,
     };
     const daemon = await startDaemon({
       config,
@@ -845,7 +827,6 @@ test("successful reload commits only browser launch configuration", async () => 
         {
           hostSocket: daemon.config.hostSocket,
           dataDir: daemon.config.dataDir,
-          seedFromChrome: daemon.config.seedFromChrome,
         },
         originalMetadata,
       );

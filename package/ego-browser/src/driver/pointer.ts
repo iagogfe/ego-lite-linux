@@ -1,5 +1,6 @@
 import { cdp, evaluate } from "../cdp-eval.js";
 import { browserCdp } from "../browser-runtime.js";
+import { state } from "../state.js";
 import { elementCenter } from "./observe.js";
 import { resolveAndCall } from "./element-ops.js";
 import { waitForSelector } from "./waits.js";
@@ -74,13 +75,13 @@ export async function click(target: MouseTarget, options: ClickOptions = {}) {
       button: "none",
       buttons: 0,
     });
-    await inputEventDelay();
+    await state.sleep(INPUT_EVENT_DELAY_MS);
     await dispatchMouse(point, "mousePressed", {
       button,
       buttons,
       clickCount,
     });
-    await inputEventDelay();
+    await state.sleep(INPUT_EVENT_DELAY_MS);
     await dispatchMouse(point, "mouseReleased", {
       button,
       buttons: 0,
@@ -159,7 +160,7 @@ export async function drag(points: MouseTarget[], options: DragOptions = {}) {
       buttons,
       clickCount: 1,
     });
-    await inputEventDelay();
+    await state.sleep(INPUT_EVENT_DELAY_MS);
     for (let i = 1; i < resolved.length; i += 1) {
       const point = resolved[i];
       await dispatchMouse(
@@ -170,7 +171,9 @@ export async function drag(points: MouseTarget[], options: DragOptions = {}) {
           buttons,
         },
       );
-      await inputEventDelay(options.delay > 0 ? options.delay : undefined);
+      await state.sleep(
+        options.delay > 0 ? options.delay : INPUT_EVENT_DELAY_MS,
+      );
     }
     await dispatchMouse(
       { ...last, sessionId: last.sessionId ?? first.sessionId },
@@ -217,10 +220,6 @@ export async function up(options: ClickOptions = {}) {
   });
 }
 
-function inputEventDelay(ms = INPUT_EVENT_DELAY_MS) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 async function installClickProbe(point: Point) {
   if (!canProbeInputFallback()) return null;
   const id = `click_${Date.now()}_${Math.random().toString(16).slice(2)}`;
@@ -258,7 +257,7 @@ async function finishClickProbe(
   clickCount: number,
 ) {
   if (!id) return false;
-  await inputEventDelay(50);
+  await state.sleep(50);
   try {
     const result = await cdp(
       "Runtime.evaluate",
@@ -365,7 +364,7 @@ async function installHoverProbe(point: Point) {
 
 async function finishHoverProbe(point: Point, id: string | null) {
   if (!id) return false;
-  await inputEventDelay(50);
+  await state.sleep(50);
   try {
     const result = await cdp(
       "Runtime.evaluate",
@@ -410,7 +409,7 @@ async function finishDragProbe(
   button: MouseButton,
 ) {
   if (!id) return false;
-  await inputEventDelay(50);
+  await state.sleep(50);
   const first = points[0];
   const last = points.at(-1);
   try {

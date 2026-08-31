@@ -19,12 +19,11 @@ export type CdpPageTarget = {
 export type CdpBridge = {
   send(method: string, params?: object, sessionId?: string): Promise<any>;
   sendRaw(payload: object): void;
-  onEvent(handler: (msg: any) => void): () => void;
   /**
    * Every successfully parsed incoming CDP message (responses + events).
    * Used by the daemon to forward raw messages to CLI `onCDPMessage`.
    */
-  onMessage?(handler: (msg: any) => void): () => void;
+  onMessage(handler: (msg: any) => void): () => void;
   close(): Promise<void>;
   listPageTargets(): Promise<CdpPageTarget[]>;
   createTarget(url: string): Promise<string>;
@@ -132,10 +131,7 @@ export function createCdpSession(
   ): Promise<any> {
     if (disposed) {
       return Promise.reject(
-        makeEgoError(
-          "EGO_CDP_CHANNEL_UNAVAILABLE",
-          "CDP session is closed",
-        ),
+        makeEgoError("EGO_CDP_CHANNEL_UNAVAILABLE", "CDP session is closed"),
       );
     }
     const id = nextId++;
@@ -244,7 +240,6 @@ function wrapSessionAsBridge(
     send: (method, params, sessionId) =>
       session.send(method, params, sessionId),
     sendRaw: (payload) => session.sendRaw(payload),
-    onEvent: (handler) => session.onEvent(handler),
     onMessage: (handler) => session.onMessage(handler),
     async close() {
       session.dispose(
@@ -376,10 +371,7 @@ export async function connectCdp(port: number): Promise<CdpBridge> {
 
   ws.addEventListener("close", () => {
     session.dispose(
-      makeEgoError(
-        "EGO_CDP_CHANNEL_UNAVAILABLE",
-        "CDP WebSocket closed",
-      ),
+      makeEgoError("EGO_CDP_CHANNEL_UNAVAILABLE", "CDP WebSocket closed"),
     );
   });
 

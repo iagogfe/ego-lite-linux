@@ -58,7 +58,7 @@ The agent picks up the `ego-browser` skill, opens the page in its own Space, rea
 
 ## Status
 
-MVP. The daemon, CDP bridge, Task Spaces, CLI shim, doctor diagnostics, stale-socket recovery, and Chrome respawn all work, and the manual acceptance checklist passes on headed Linux Chrome. Treat it as early software: the surface is smaller than the macOS app, and the profile-seeding path is off by default because it can corrupt a live Chrome profile.
+MVP. The daemon, CDP bridge, Task Spaces, CLI shim, doctor diagnostics, stale-socket recovery, and Chrome respawn all work, and the manual acceptance checklist passes on headed Linux Chrome. Treat it as early software: the surface is smaller than the macOS app, and profile seeding is not implemented yet because copying a live Chrome profile can corrupt it.
 
 Details and internals: [`package/ego-linux-host/README.md`](package/ego-linux-host/README.md).
 Design spec: [`docs/superpowers/specs/2026-07-23-ego-linux-host-design.md`](docs/superpowers/specs/2026-07-23-ego-linux-host-design.md).

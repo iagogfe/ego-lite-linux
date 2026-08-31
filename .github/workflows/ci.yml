@@ -49,7 +49,7 @@ jobs:
       - run: npm ci
       - run: npm test
       - name: Validar site skills
-        run: npm run validate:site-skills
+        run: EGO_BROWSER_AGENT_WORKSPACE=../../skills/ego-browser node dist/scripts/validate-site-skills.js
 
   ego-linux-host:
     name: ego-linux-host (Node ${{ matrix.node }})
@@ -139,7 +139,7 @@ jobs:
         env:
           EGO_HEADLESS: '1'
           EGO_LINUX_E2E: '1'
-        run: npm test
+        run: node --test dist/e2e-smoke.test.js
 
       - name: Log do daemon quando falha
         if: failure()
