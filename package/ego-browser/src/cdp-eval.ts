@@ -1,7 +1,5 @@
 import { send, state } from "./state.js";
 
-class TimeoutError extends Error {}
-
 /**
  * Send a raw Chrome DevTools Protocol command.
  * @param {string} method CDP method name, for example Runtime.evaluate.
@@ -81,10 +79,7 @@ async function runtimeEvaluate(
     );
     return runtimeValue(response, expression);
   } catch (error) {
-    if (
-      error instanceof TimeoutError ||
-      /timed out/i.test(error?.message || "")
-    ) {
+    if (/timed out/i.test(error?.message || "")) {
       throw new Error(
         `Runtime.evaluate timed out; expression: ${jsSnippet(expression)}`,
       );

@@ -429,7 +429,7 @@ test("pressSequentially focuses a selector then presses characters with delay", 
     keyDowns.map((entry) => entry.params.key),
     ["a", "b"],
   );
-  assert.equal(now, 10);
+  assert.equal(now, 60);
   assert(
     calls.some(
       (entry) =>

@@ -37,16 +37,13 @@ export async function browserFetch(url, options: any = {}) {
   const payload = JSON.stringify({ url, options: fetchOptions, timeout });
   return evaluate(`(async () => {
     const { url, options, timeout } = ${payload};
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeout * 1000);
-    try {
-      const response = await fetch(url, { ...options, signal: controller.signal });
-      if (!response.ok) {
-        throw new Error(\`\${options.method || "GET"} \${url} failed: HTTP \${response.status}\`);
-      }
-      return await response.text();
-    } finally {
-      clearTimeout(timer);
+    const response = await fetch(url, {
+      ...options,
+      signal: AbortSignal.timeout(timeout * 1000),
+    });
+    if (!response.ok) {
+      throw new Error(\`\${options.method || "GET"} \${url} failed: HTTP \${response.status}\`);
     }
+    return await response.text();
   })()`);
 }

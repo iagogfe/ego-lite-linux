@@ -9,7 +9,6 @@ import type { CdpBridge } from "./cdp-bridge.js";
 import { makeEgoError } from "./errors.js";
 
 export type SnapshotOptions = {
-  scope?: "only_within_viewport" | "full_page";
   includeActionMarks?: boolean;
   includeStableLocator?: boolean;
   maxResultLength?: number;
@@ -212,14 +211,7 @@ export async function snapshotPage(
 ): Promise<SnapshotResult> {
   try {
     await cdp.send("Accessibility.enable", {}, sessionId);
-    const params: Record<string, unknown> = {};
-    // scope is reserved for future viewport filtering; full tree for MVP
-    void options?.scope;
-    const result = await cdp.send(
-      "Accessibility.getFullAXTree",
-      params,
-      sessionId,
-    );
+    const result = await cdp.send("Accessibility.getFullAXTree", {}, sessionId);
     const nodes = result?.nodes;
     if (!Array.isArray(nodes)) {
       throw makeEgoError(
@@ -242,9 +234,6 @@ export async function snapshotPage(
         : typeof err === "string"
           ? err
           : String(err);
-    throw makeEgoError(
-      "EGO_SNAPSHOT_FAILED",
-      `Snapshot failed: ${detail}`,
-    );
+    throw makeEgoError("EGO_SNAPSHOT_FAILED", `Snapshot failed: ${detail}`);
   }
 }

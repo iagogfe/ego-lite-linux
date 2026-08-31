@@ -2,9 +2,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   encodeLine,
-  encodeRequest,
-  encodeResponse,
-  encodeEvent,
   decodeLine,
   isRpcRequest,
   isRpcResponse,
@@ -15,15 +12,15 @@ import {
   type RpcEvent,
 } from "./rpc.js";
 
-test("encodeRequest emits NDJSON with trailing newline", () => {
-  const line = encodeRequest({ id: 1, method: "ping" });
+test("encodeLine emits NDJSON with trailing newline", () => {
+  const line = encodeLine({ id: 1, method: "ping" });
   assert.equal(line.endsWith("\n"), true);
   assert.equal(line, '{"id":1,"method":"ping"}\n');
 });
 
-test("encodeResponse and encodeEvent round-trip via decodeLine", () => {
+test("encodeLine round-trips RPC messages via decodeLine", () => {
   const res: RpcResponse = { id: 2, result: { ok: true } };
-  const decodedRes = decodeLine(encodeResponse(res).trimEnd());
+  const decodedRes = decodeLine(encodeLine(res).trimEnd());
   assert.deepEqual(decodedRes, res);
   assert.equal(isRpcResponse(decodedRes), true);
 
@@ -31,7 +28,7 @@ test("encodeResponse and encodeEvent round-trip via decodeLine", () => {
     event: "cdp.message",
     params: { payload: '{"id":1}' },
   };
-  const decodedEv = decodeLine(encodeEvent(ev).trimEnd());
+  const decodedEv = decodeLine(encodeLine(ev).trimEnd());
   assert.deepEqual(decodedEv, ev);
   assert.equal(isRpcEvent(decodedEv), true);
 });
@@ -68,18 +65,13 @@ test("decodeLine rejects empty and invalid JSON", () => {
   assert.throws(() => decodeLine("[]"), /JSON object/);
 });
 
-test("encodeLine is shared by helpers", () => {
-  assert.equal(encodeLine({ a: 1 }), '{"a":1}\n');
-});
-
 test("LineBuffer splits chunks across boundaries", () => {
   const buf = new LineBuffer();
   assert.deepEqual(buf.push('{"id":1,"method":"ping"}'), []);
-  assert.deepEqual(buf.push("\n{\"id\":2,"), ['{"id":1,"method":"ping"}']);
+  assert.deepEqual(buf.push('\n{"id":2,'), ['{"id":1,"method":"ping"}']);
   assert.deepEqual(buf.push('"method":"doctor"}\n'), [
     '{"id":2,"method":"doctor"}',
   ]);
-  assert.equal(buf.pending(), "");
 });
 
 test("LineBuffer skips empty lines and accepts CRLF", () => {

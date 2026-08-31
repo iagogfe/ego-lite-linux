@@ -14,7 +14,6 @@ import { fileURLToPath } from "node:url";
 
 import { build } from "esbuild";
 import { rollup } from "rollup";
-import resolve from "@rollup/plugin-node-resolve";
 import typescript from "@rollup/plugin-typescript";
 
 import { extractHelpDocs } from "./extract-help-docs.mjs";
@@ -25,8 +24,7 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const repoRoot = dirname(dirname(root));
 const distDir = join(root, "dist");
 const outDir = join(distDir, "out");
-const bundledCliDir = outDir;
-const bundledCli = join(bundledCliDir, "index.js");
+const bundledCli = join(outDir, "index.js");
 const skillSourceDir = join(repoRoot, "skills", "ego-browser");
 const bundledSkillDir = join(outDir, "ego-browser");
 const buildLock = join(root, ".build.lock");
@@ -46,7 +44,7 @@ try {
   await rm(join(root, "artifacts"), { recursive: true, force: true });
   await rm(join(root, "ego-browser.js"), { force: true });
   await rm(join(root, "bin"), { recursive: true, force: true });
-  await mkdir(bundledCliDir, { recursive: true });
+  await mkdir(outDir, { recursive: true });
 
   const common = {
     platform: "node",
@@ -69,7 +67,6 @@ try {
     input: join(root, "src/index.ts"),
     external: [...builtinModules, ...builtinModules.map((m) => `node:${m}`)],
     plugins: [
-      resolve(),
       typescript({
         tsconfig: join(root, "tsconfig.json"),
         compilerOptions: {

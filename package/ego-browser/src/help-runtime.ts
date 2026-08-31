@@ -54,6 +54,10 @@ export function help(
   );
 }
 
+export function getHelperDoc(name: string): HelperDoc | undefined {
+  return getDocsMap().get(name);
+}
+
 export function formatHelp(doc: HelperDoc): string {
   const lines: string[] = [];
   if (doc.description) {

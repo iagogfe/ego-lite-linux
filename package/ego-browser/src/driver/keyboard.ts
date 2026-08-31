@@ -223,7 +223,7 @@ export async function press(keyCombo) {
       ...(text ? { text, unmodifiedText: text } : {}),
       ...(commands ? { commands } : {}),
     });
-    await inputEventDelay();
+    await state.sleep(INPUT_EVENT_DELAY_MS);
     await dispatchKeyEvent({
       type: "keyUp",
       ...base,
@@ -523,10 +523,6 @@ export async function dispatchEvent(selector, type, eventInit = {}) {
   await resolveAndCall(selector, DISPATCH_EVENT_SOURCE, [type, eventInit]);
 }
 
-function inputEventDelay() {
-  return new Promise((resolve) => setTimeout(resolve, INPUT_EVENT_DELAY_MS));
-}
-
 async function dispatchKeyEvent(params: Record<string, unknown>) {
   await browserCdp(
     "Input.dispatchKeyEvent",
@@ -565,7 +561,7 @@ async function finishKeyProbe(
   definition: { key: string; code: string; text: string; commands?: string[] },
 ) {
   if (!id) return false;
-  await inputEventDelay();
+  await state.sleep(INPUT_EVENT_DELAY_MS);
   try {
     const result = await cdp("Runtime.evaluate", {
       expression: `(() => {

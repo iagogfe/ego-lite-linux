@@ -7,7 +7,7 @@
 import { createConnection, type Socket } from "node:net";
 import {
   decodeLine,
-  encodeRequest,
+  encodeLine,
   isRpcEvent,
   isRpcResponse,
   LineBuffer,
@@ -102,7 +102,7 @@ export async function connectHost(socketPath: string): Promise<HostConnection> {
       return new Promise((resolve, reject) => {
         pending.set(id, { resolve, reject });
         try {
-          socket.write(encodeRequest({ id, method, params }));
+          socket.write(encodeLine({ id, method, params }));
         } catch (err) {
           pending.delete(id);
           reject(err instanceof Error ? err : new Error(String(err)));

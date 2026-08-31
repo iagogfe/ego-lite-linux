@@ -34,7 +34,13 @@ export function extractHelpDocs(source) {
     }
   }
 
-  walkFunctions(ast, (node) => {
+  walkAst(ast, (node) => {
+    if (
+      node.type !== "FunctionDeclaration" &&
+      node.type !== "FunctionExpression"
+    ) {
+      return;
+    }
     const name = extractFunctionName(node);
     if (!name) return;
 
@@ -64,57 +70,36 @@ export function extractHelpDocs(source) {
     });
   });
 
-  walkAliases(ast, (name, target) => {
-    const existing = docs.get(target);
-    if (existing && !docs.has(name)) {
-      docs.set(name, { ...existing, name });
+  walkAst(ast, (node) => {
+    if (node.type !== "VariableDeclaration") return;
+    for (const decl of node.declarations || []) {
+      if (decl.id?.type === "Identifier" && decl.init?.type === "Identifier") {
+        const name = decl.id.name;
+        const target = decl.init.name;
+        const existing = docs.get(target);
+        if (existing && !docs.has(name)) {
+          docs.set(name, { ...existing, name });
+        }
+      }
     }
   });
 
   return [...docs.values()];
 }
 
-function walkFunctions(node, visitor) {
+function walkAst(node, visitor) {
   if (!node || typeof node !== "object") return;
-  if (
-    node.type === "FunctionDeclaration" ||
-    node.type === "FunctionExpression"
-  ) {
-    visitor(node);
-  }
+  visitor(node);
   for (const key of Object.keys(node)) {
     if (key === "type" || key === "loc" || key === "start" || key === "end")
       continue;
     const child = node[key];
     if (Array.isArray(child)) {
       for (const item of child) {
-        if (item && typeof item.type === "string") walkFunctions(item, visitor);
+        if (item && typeof item.type === "string") walkAst(item, visitor);
       }
     } else if (child && typeof child.type === "string") {
-      walkFunctions(child, visitor);
-    }
-  }
-}
-
-function walkAliases(node, visitor) {
-  if (!node || typeof node !== "object") return;
-  if (node.type === "VariableDeclaration") {
-    for (const decl of node.declarations || []) {
-      if (decl.id?.type === "Identifier" && decl.init?.type === "Identifier") {
-        visitor(decl.id.name, decl.init.name);
-      }
-    }
-  }
-  for (const key of Object.keys(node)) {
-    if (key === "type" || key === "loc" || key === "start" || key === "end")
-      continue;
-    const child = node[key];
-    if (Array.isArray(child)) {
-      for (const item of child) {
-        if (item && typeof item.type === "string") walkAliases(item, visitor);
-      }
-    } else if (child && typeof child.type === "string") {
-      walkAliases(child, visitor);
+      walkAst(child, visitor);
     }
   }
 }

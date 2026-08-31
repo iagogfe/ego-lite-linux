@@ -19,7 +19,6 @@ function baseConfig(overrides: Partial<HostConfig> = {}): HostConfig {
     headless: true,
     hostSocket: "/tmp/ego-test.sock",
     dataDir: join(tmpdir(), `ego-chrome-data-${process.pid}`),
-    seedFromChrome: false,
     ...overrides,
   };
 }

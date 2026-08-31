@@ -53,7 +53,7 @@ EOF
 Site learnings under `agentWorkspace()/learnings/<site>/` are always active and read on every helper call. Validate them with:
 
 ```bash
-npm run validate:site-skills    # alias: validate:learnings
+npm run validate:site-skills
 ```
 
 ## Source layout
@@ -86,7 +86,7 @@ The top-level repo README has the full helper inventory and the task-space / con
 ## Design constraints
 
 - The browser runtime owns tabs, task spaces, CDP transport, snapshots, and event delivery. This package keeps only agent-facing ergonomics.
-- Snapshot helpers use the browser runtime contract: `ego.snapshot({ scope, includeActionMarks, includeStableLocator })`.
+- Snapshot helpers use the browser runtime contract: `ego.snapshot({ includeActionMarks, includeStableLocator })`.
 - Public agent-facing helpers are object-style facades; internal implementation helpers remain camelCase.
 - Site-specific reusable experience belongs under `skills/ego-browser/learnings/`, not in this package.
 

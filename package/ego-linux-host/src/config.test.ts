@@ -26,7 +26,6 @@ test("loadConfig defaults are headed, cdp 9222, null chromePath", async () => {
   assert.equal(cfg.chromePath, null);
   assert.equal(cfg.dataDir, "/tmp/ego-cfg-defaults");
   assert.equal(cfg.hostSocket, "/tmp/ego-cfg-defaults/host.sock");
-  assert.equal(cfg.seedFromChrome, false);
 });
 
 test("loadConfig env wins over config.json", async () => {
@@ -39,7 +38,6 @@ test("loadConfig env wins over config.json", async () => {
       headless: false,
       cdpPort: 1111,
       chromePath: "/from/file",
-      seedFromChrome: true,
       hostSocket: "/from/file.sock",
       userDataDir: "/from/file/profile",
     }),
@@ -59,8 +57,6 @@ test("loadConfig env wins over config.json", async () => {
     assert.equal(cfg.chromePath, "/from/env");
     assert.equal(cfg.hostSocket, "/from/env.sock");
     assert.equal(cfg.userDataDir, "/from/env/profile");
-    // seedFromChrome has no env override — file value kept
-    assert.equal(cfg.seedFromChrome, true);
   } finally {
     await rm(base, { recursive: true, force: true });
   }
@@ -76,7 +72,6 @@ test("loadConfig reads optional config.json when env absent", async () => {
       headless: true,
       cdpPort: 9333,
       chromePath: "/usr/bin/chromium",
-      seedFromChrome: true,
       hostSocket: "/tmp/custom.sock",
       userDataDir: "/tmp/custom-profile",
     }),
@@ -89,7 +84,6 @@ test("loadConfig reads optional config.json when env absent", async () => {
     assert.equal(cfg.headless, true);
     assert.equal(cfg.cdpPort, 9333);
     assert.equal(cfg.chromePath, "/usr/bin/chromium");
-    assert.equal(cfg.seedFromChrome, true);
     assert.equal(cfg.hostSocket, "/tmp/custom.sock");
     assert.equal(cfg.userDataDir, "/tmp/custom-profile");
     assert.equal(cfg.dataDir, "/tmp/ego-cfg-file-data");

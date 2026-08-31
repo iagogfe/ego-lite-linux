@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { accessSync, constants } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import type { HostConfig } from "./config.js";
 import { makeEgoError } from "./errors.js";
 
@@ -99,10 +100,6 @@ export async function isCdpUp(port: number): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function hasDisplayEnv(env: NodeJS.ProcessEnv = process.env): boolean {

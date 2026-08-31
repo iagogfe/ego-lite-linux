@@ -144,7 +144,6 @@ export const workflowCases = [
     body: homeCase(`
       /* Step 1: take a snapshot and capture refs for known elements. */
       const snap1 = await page.snapshotRaw({
-        scope: "full_page",
         includeActionMarks: true,
         includeStableLocator: true,
       });
@@ -160,7 +159,7 @@ export const workflowCases = [
       /* Step 3: modify the DOM, then verify the snapshot reflects the new element. */
       await page.locator("#add-element").click();
       await page.waitForSelector("#dynamic-element", { timeout: 3000, state: "visible" });
-      const textAfterAdd = await page.snapshot({ scope: "full_page" });
+      const textAfterAdd = await page.snapshot();
       assertIncludes(String(textAfterAdd), "Dynamic!", "workflow: snapshot text includes dynamic element after mutation");
 
       /* Step 4: use the old button ref — it should still work because the
@@ -190,7 +189,7 @@ export const workflowCases = [
       assertEqual(emptyEvents.length, 0, "workflow: second drain returns empty buffer");
 
       /* Step 8: take a snapshot and verify it reflects current DOM state. */
-      const text = await page.snapshot({ scope: "full_page" });
+      const text = await page.snapshot();
       assertIncludes(text, "Helper e2e fixture", "workflow: snapshot includes page heading");
       // Dynamic element was removed, so its text should not appear
       const hasDynamic = String(text).includes("Dynamic!");

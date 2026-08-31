@@ -22,7 +22,6 @@ import {
 } from "../ref-state.js";
 
 type SnapshotOptions = {
-  scope?: "only_within_viewport" | "full_page";
   includeActionMarks?: boolean;
   includeStableLocator?: boolean;
 };
@@ -67,12 +66,11 @@ registerSnapshotForRefRefresh(() => snapshotRaw());
 /**
  * Return snapshot content with agent-friendly defaults. The text surface most
  * agents want; use snapshotRaw when you need the structured { content, refs }.
- * @param {{scope?: "only_within_viewport"|"full_page", includeActionMarks?: boolean, includeStableLocator?: boolean}} [options]
+ * @param {{includeActionMarks?: boolean, includeStableLocator?: boolean}} [options]
  * @returns {Promise<string>}
  */
 export async function snapshot(options: SnapshotOptions = {}) {
   const result = await snapshotRaw({
-    scope: options.scope ?? "full_page",
     includeActionMarks: options.includeActionMarks ?? true,
     includeStableLocator: options.includeStableLocator ?? true,
   });

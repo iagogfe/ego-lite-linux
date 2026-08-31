@@ -70,39 +70,6 @@ export function learningsRoot(workspace = agentWorkspace()) {
 
 export const siteSkillsRoot = learningsRoot;
 
-export async function checkDomainLearningExists(
-  urlOrDomain: string,
-  options: { root?: string; agentWorkspace?: string } = {},
-) {
-  const hostname = urlHostname(urlOrDomain);
-  const root =
-    options.root || learningsRoot(options.agentWorkspace || agentWorkspace());
-  const matches = hostname ? await siteSkillsForUrl(hostname, { root }) : [];
-  return {
-    exists: matches.length > 0,
-    hostname,
-    root,
-    matches,
-  };
-}
-
-export async function checkLearningExists(
-  siteId: string,
-  options: { root?: string; agentWorkspace?: string } = {},
-) {
-  const root =
-    options.root || learningsRoot(options.agentWorkspace || agentWorkspace());
-  const siteDir = join(root, siteId);
-  const manifestPath = join(siteDir, "manifest.json");
-  const exists = await pathExists(manifestPath);
-  return {
-    exists,
-    root,
-    siteDir,
-    manifestPath,
-  };
-}
-
 export async function siteSkillsForUrl(url, options: any = {}) {
   const hostname = urlHostname(url);
   if (!hostname) {

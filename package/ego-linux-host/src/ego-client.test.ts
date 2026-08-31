@@ -50,7 +50,6 @@ test("runCli sends the effective config with reload", async () => {
         headless: false,
         hostSocket: "/tmp/ego-reload.sock",
         dataDir: "/tmp/ego-reload-data",
-        seedFromChrome: false,
       },
     },
   ]);
@@ -312,7 +311,6 @@ test("connectHost ping + installEgoClient against daemon", async () => {
       headless: true,
       hostSocket: join(dir, "host.sock"),
       dataDir: dir,
-      seedFromChrome: false,
     };
     assert.equal(await pingSocket(config.hostSocket), false);
     const daemon = await startDaemon({
@@ -381,7 +379,6 @@ test("ensureHost unlinks stale socket before failing on missing daemon", async (
       headless: true,
       hostSocket: sockPath,
       dataDir: dir,
-      seedFromChrome: false,
     };
 
     await assert.rejects(

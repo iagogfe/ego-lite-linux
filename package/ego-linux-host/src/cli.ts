@@ -8,6 +8,7 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { open, mkdir, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { loadConfig, type HostConfig } from "./config.js";
 import {
@@ -210,10 +211,6 @@ export async function ensureHost(
   throw new Error(
     `ego-linux-hostd did not become ready within ${timeoutMs}ms (socket ${config.hostSocket}; log ${logPath})`,
   );
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
 }
 
 function writeStream(

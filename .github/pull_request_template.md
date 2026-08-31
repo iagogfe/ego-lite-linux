@@ -39,7 +39,7 @@ npm run validate:site-skills
 
 ## Checklist
 
-- [ ] The PR targets the correct base branch (`dev` for normal changes; only `dev` may target `main`).
+- [ ] The PR targets the repository's base branch (`main`).
 - [ ] The change is focused and does not include unrelated cleanup.
 - [ ] Tests were added or updated for behavior changes, or the reason they are unnecessary is explained above.
 - [ ] Relevant tests and validation commands pass locally.

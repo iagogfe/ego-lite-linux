@@ -43,10 +43,6 @@ export async function send(req) {
   return state.send(req);
 }
 
-export function cdpAvailable() {
-  return Boolean(state.cdpOverride) || state.send !== defaultSend;
-}
-
 export function setOverrides(overrides) {
   const previous = { ...state };
   Object.assign(state, overrides);

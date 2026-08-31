@@ -53,7 +53,7 @@ O agente carrega a skill `ego-browser`, abre a página no Space dele, lê um Sna
 
 ## Status
 
-MVP. Daemon, ponte CDP, Task Spaces, shim de CLI, diagnóstico `--doctor`, recuperação de socket órfão e respawn do Chrome funcionam, e o checklist manual de aceitação passa no Chrome headed em Linux. Trate como software novo: a superfície é menor que a do app de macOS, e o caminho de seed de perfil vem desligado por padrão porque pode corromper um perfil de Chrome em uso.
+MVP. Daemon, ponte CDP, Task Spaces, shim de CLI, diagnóstico `--doctor`, recuperação de socket órfão e respawn do Chrome funcionam, e o checklist manual de aceitação passa no Chrome headed em Linux. Trate como software novo: a superfície é menor que a do app de macOS, e o seed de perfil ainda não é implementado porque copiar um perfil de Chrome em uso pode corrompê-lo.
 
 Detalhes e internals: [`package/ego-linux-host/README.md`](package/ego-linux-host/README.md).
 Spec de design: [`docs/superpowers/specs/2026-07-23-ego-linux-host-design.md`](docs/superpowers/specs/2026-07-23-ego-linux-host-design.md).

@@ -24,7 +24,6 @@ export function homeCase(body) {
 export function buttonRefSetup() {
   return `
     const snap = await page.snapshotRaw({
-      scope: "full_page",
       includeActionMarks: true,
       includeStableLocator: true,
     });

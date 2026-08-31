@@ -33,7 +33,7 @@ Notes:
 - Ensure `~/.local/bin` is on your `PATH` (`export PATH="$HOME/.local/bin:$PATH"`).
 - Headed: prefer WSLg / native display (`DISPLAY` set). Headless: `export EGO_HEADLESS=1`.
 - Non-standard Chrome: `export EGO_CHROME_PATH=/path/to/chrome`.
-- **Profile seed** (`seedFromChrome` / future `--seed-chrome`): off by default and **risky** (can corrupt a live Chrome profile). See install docs; do not enable unless Chrome is closed and you accept the risk.
+- **Profile seed** (future `--seed-chrome`) is not implemented yet and is **risky** (it can corrupt a live Chrome profile). See install docs.
 
 Details and troubleshooting: [`skills/ego-browser/references/install.md`](../../skills/ego-browser/references/install.md) (section **Install steps (Linux / WSL)**).
 

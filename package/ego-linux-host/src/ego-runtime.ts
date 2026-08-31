@@ -256,12 +256,7 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
     const handler = (msg: any) => {
       emit({ event: "cdp.message", params: { payload: JSON.stringify(msg) } });
     };
-    if (typeof cdp.onMessage === "function") {
-      detachCdp = cdp.onMessage(handler);
-    } else {
-      // Fallback: events only (responses with id may be missed)
-      detachCdp = cdp.onEvent(handler);
-    }
+    detachCdp = cdp.onMessage(handler);
     return () => {
       if (detachCdp) {
         detachCdp();

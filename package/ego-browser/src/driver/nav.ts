@@ -187,19 +187,7 @@ export async function openOrReuseTab(
   const tabs = await listTabs({ includeChrome: false });
   const match = options.match || "origin";
   const existing = tabs.find((tab) => tabMatchesUrl(tab.url, url, match));
-  if (existing) {
-    await switchTab(existing.targetId);
-    if (options.wait) {
-      await waitForDocumentLoad({ timeout: options.timeout ?? 20000 });
-    }
-    const settle = Number(options.settle ?? 0);
-    if (settle > 0) {
-      await state.sleep(settle);
-    }
-    return { ...existing, active: true, reused: true };
-  }
-
-  const reusable = await findReusableTabAcrossSpaces(url, match);
+  const reusable = existing ?? (await findReusableTabAcrossSpaces(url, match));
   if (reusable) {
     await switchTab(reusable.targetId);
     if (options.wait) {
