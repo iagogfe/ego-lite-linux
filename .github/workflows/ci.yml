@@ -4,8 +4,8 @@
 # dos ataques tj-actions (mar/2025) e trivy-action (mar/2026). O Dependabot
 # atualiza os SHAs e o comentario da versao junto.
 #
-# Sem job de release: os pacotes deste repositorio nao sao publicados. Release
-# do ego-browser sai do upstream citrolabs/ego-lite.
+# O workflow de release cria notas automaticas para tags de versao; os pacotes
+# deste repositorio continuam sem publicacao npm.
 
 name: CI
 
