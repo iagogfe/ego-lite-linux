@@ -84,10 +84,7 @@ export async function connectHost(socketPath: string): Promise<HostConnection> {
     if (closed) return;
     closed = true;
     failAll(
-      makeEgoError(
-        "EGO_TASK_HOST_DISCONNECTED",
-        "host daemon socket closed",
-      ),
+      makeEgoError("EGO_TASK_HOST_DISCONNECTED", "host daemon socket closed"),
     );
   });
 
@@ -160,10 +157,7 @@ export async function pingSocket(
     conn = await Promise.race([
       connectHost(socketPath),
       new Promise<never>((_, reject) =>
-        setTimeout(
-          () => reject(new Error("ping connect timeout")),
-          timeoutMs,
-        ),
+        setTimeout(() => reject(new Error("ping connect timeout")), timeoutMs),
       ),
     ]);
     const result = await Promise.race([
@@ -259,7 +253,10 @@ export function installEgoClient(conn: HostConnection): void {
   conn.onEvent((event, params) => {
     if (event === "cdp.message") {
       const payload = params?.payload;
-      if (typeof payload === "string" && typeof ego.onCDPMessage === "function") {
+      if (
+        typeof payload === "string" &&
+        typeof ego.onCDPMessage === "function"
+      ) {
         try {
           ego.onCDPMessage(payload);
         } catch {

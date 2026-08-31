@@ -138,8 +138,18 @@ test("snapshot works for agent-owned space", async () => {
 test("listTabs filters to selected space only", async () => {
   const { sm, fakeCdp, runtime } = setup({
     targets: [
-      { targetId: "user-tab", title: "User", url: "https://u.example", type: "page" },
-      { targetId: "agent-tab", title: "Agent", url: "https://a.example", type: "page" },
+      {
+        targetId: "user-tab",
+        title: "User",
+        url: "https://u.example",
+        type: "page",
+      },
+      {
+        targetId: "agent-tab",
+        title: "Agent",
+        url: "https://a.example",
+        type: "page",
+      },
     ],
   });
   sm.adoptOrphanTargets(["user-tab"]);
@@ -211,7 +221,9 @@ test("findReusableTab moves a matching tab from another agent space", async () =
     sm.list().find((space) => space.id === oldSpace.id)?.targetIds,
     [],
   );
-  assert.deepEqual(sm.list().find((space) => space.id === 1)?.targetIds, ["user-tab"]);
+  assert.deepEqual(sm.list().find((space) => space.id === 1)?.targetIds, [
+    "user-tab",
+  ]);
   void fakeCdp;
 });
 
@@ -393,10 +405,7 @@ test("attachCdpForwarding pushes cdp.message events", async () => {
   fakeCdp.deliverMessage({ id: 9, result: { value: 1 } });
   assert.equal(events.length, 1);
   assert.equal(events[0].event, "cdp.message");
-  assert.equal(
-    JSON.parse(events[0].params.payload).result.value,
-    1,
-  );
+  assert.equal(JSON.parse(events[0].params.payload).result.value, 1);
 });
 
 test("handle accepts ego. prefix methods", async () => {
@@ -640,8 +649,14 @@ test("sem atividade, o overlay cai para o estado parado", async () => {
     payload: '{"id":1,"method":"Page.navigate","params":{"url":"about:blank"}}',
   });
   await new Promise((r) => setTimeout(r, 10));
-  assert.equal(evaluates.filter((e) => e.includes('setState("idle"')).length, 0);
+  assert.equal(
+    evaluates.filter((e) => e.includes('setState("idle"')).length,
+    0,
+  );
 
   await new Promise((r) => setTimeout(r, 60));
-  assert.equal(evaluates.filter((e) => e.includes('setState("idle"')).length, 1);
+  assert.equal(
+    evaluates.filter((e) => e.includes('setState("idle"')).length,
+    1,
+  );
 });

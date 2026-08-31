@@ -37,7 +37,10 @@ export const READING = "lendo página";
  * "clicando" when a click is being dispatched.
  */
 export function actionLabel(cdpMethod: string): string {
-  if (cdpMethod.startsWith("Input.dispatchKey") || cdpMethod === "Input.insertText") {
+  if (
+    cdpMethod.startsWith("Input.dispatchKey") ||
+    cdpMethod === "Input.insertText"
+  ) {
     return "digitando";
   }
   if (cdpMethod.startsWith("Input.")) return "clicando";
@@ -547,7 +550,10 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
       const sessionId = await deps.ensureSession();
       await deps.getCdp().send(
         "Runtime.evaluate",
-        { expression: `${AGENT_OVERLAY_JS};__egoAgentOverlay.${call}`, returnByValue: true },
+        {
+          expression: `${AGENT_OVERLAY_JS};__egoAgentOverlay.${call}`,
+          returnByValue: true,
+        },
         sessionId,
       );
     } catch {
@@ -585,7 +591,10 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
       // navigation wiped the overlay out of the fresh page context.
       pendingLabel = null;
       if (now - lastMark >= 1000) paintLabel(label);
-    } else if (now >= holdUntil || (shownLabel === READING && label !== READING)) {
+    } else if (
+      now >= holdUntil ||
+      (shownLabel === READING && label !== READING)
+    ) {
       // A real action beats the reading noise the harness emits between steps
       // (resolving a selector, reading a value back), even mid-hold — otherwise
       // the badge sits on "lendo página" through an entire fill.
