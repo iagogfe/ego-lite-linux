@@ -99,6 +99,45 @@ test("assignTarget moves tab between spaces", () => {
   );
 });
 
+test("targetsForReusableTabs excludes user and handed-off spaces", () => {
+  const sm = new SpaceManager();
+  const agent = sm.createAgentSpace("agent");
+  const handedOff = sm.createAgentSpace("handed-off");
+
+  sm.assignTarget("agent-tab", agent.id);
+  sm.assignTarget("handed-off-tab", handedOff.id);
+  sm.use(handedOff.id);
+  sm.handOff();
+
+  sm.use(1);
+  sm.assignTarget("user-tab");
+
+  assert.deepEqual(sm.targetsForReusableTabs(), ["agent-tab"]);
+});
+
+test("reconcileTargets removes memberships for closed Chrome targets", () => {
+  const sm = new SpaceManager();
+  const agent = sm.createAgentSpace("stale");
+  sm.assignTarget("live", agent.id);
+  sm.assignTarget("closed", agent.id);
+
+  sm.reconcileTargets(["live"]);
+
+  assert.deepEqual(sm.list().find((s) => s.id === agent.id)?.targetIds, [
+    "live",
+  ]);
+});
+
+test("clearSelection leaves persisted spaces available without selecting one", () => {
+  const sm = new SpaceManager();
+  const agent = sm.createAgentSpace("resume-by-name");
+  sm.use(agent.id);
+  sm.clearSelection();
+
+  assert.equal(sm.selected(), null);
+  assert.ok(sm.list().some((space) => space.id === agent.id));
+});
+
 test("adoptOrphanTargets puts unknowns on user space", () => {
   const sm = new SpaceManager();
   const a = sm.createAgentSpace("known");

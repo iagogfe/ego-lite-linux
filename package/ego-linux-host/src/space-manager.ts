@@ -155,6 +155,11 @@ export class SpaceManager {
     await writeFile(this.persistPath, JSON.stringify(payload, null, 2), "utf8");
   }
 
+  /** Do not carry the last daemon selection into a new browser session. */
+  clearSelection(): void {
+    this.selectedId = null;
+  }
+
   /** Internal list including targetIds. */
   list(): Space[] {
     return this.spaces.map(cloneSpace);
@@ -312,6 +317,23 @@ export class SpaceManager {
   targetsForSelected(): string[] {
     const space = this.selectedSpace();
     return space ? [...space.targetIds] : [];
+  }
+
+  /** Agent-owned tabs that may be reused by the currently selected space. */
+  targetsForReusableTabs(): string[] {
+    return this.spaces
+      .filter((space) => space.ownership === "agent")
+      .flatMap((space) => space.targetIds);
+  }
+
+  /** Remove persisted memberships for targets that no longer exist in Chrome. */
+  reconcileTargets(targetIds: Iterable<string>): void {
+    const live = new Set(targetIds);
+    for (const space of this.spaces) {
+      space.targetIds = space.targetIds.filter((targetId) =>
+        live.has(targetId),
+      );
+    }
   }
 
   spaceIdForTarget(targetId: string): number | null {

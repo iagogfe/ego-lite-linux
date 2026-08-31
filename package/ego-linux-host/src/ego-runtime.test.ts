@@ -173,6 +173,75 @@ test("listTabs returns empty for agent space with no tabs (not user tabs)", asyn
   assert.deepEqual(result.tabs, []);
 });
 
+test("findReusableTab moves a matching tab from another agent space", async () => {
+  const { sm, fakeCdp, runtime } = setup({
+    targets: [
+      {
+        targetId: "old-agent-tab",
+        title: "Old Example",
+        url: "https://example.com/previous",
+        type: "page",
+      },
+      {
+        targetId: "user-tab",
+        title: "User Example",
+        url: "https://example.com/user",
+        type: "page",
+      },
+    ],
+  });
+  sm.adoptOrphanTargets(["user-tab"]);
+  const oldSpace = sm.createAgentSpace("old-job");
+  sm.assignTarget("old-agent-tab", oldSpace.id);
+  const currentSpace = sm.createAgentSpace("current-job");
+  sm.use(currentSpace.id);
+
+  const result = await runtime.handle("findReusableTab", {
+    url: "https://example.com/current",
+    match: "origin",
+  });
+
+  assert.deepEqual(result, {
+    targetId: "old-agent-tab",
+    title: "Old Example",
+    url: "https://example.com/previous",
+  });
+  assert.deepEqual(sm.targetsForSelected(), ["old-agent-tab"]);
+  assert.deepEqual(
+    sm.list().find((space) => space.id === oldSpace.id)?.targetIds,
+    [],
+  );
+  assert.deepEqual(sm.list().find((space) => space.id === 1)?.targetIds, ["user-tab"]);
+  void fakeCdp;
+});
+
+test("findReusableTab ignores handed-off tabs", async () => {
+  const { sm, runtime } = setup({
+    targets: [
+      {
+        targetId: "handed-off-tab",
+        title: "Example",
+        url: "https://example.com/previous",
+        type: "page",
+      },
+    ],
+  });
+  const handedOff = sm.createAgentSpace("handed-off");
+  sm.assignTarget("handed-off-tab", handedOff.id);
+  sm.use(handedOff.id);
+  sm.handOff();
+  const current = sm.createAgentSpace("current");
+  sm.use(current.id);
+
+  const result = await runtime.handle("findReusableTab", {
+    url: "https://example.com/current",
+    match: "origin",
+  });
+
+  assert.equal(result, null);
+  assert.deepEqual(sm.targetsForSelected(), []);
+});
+
 test("createTab creates target and assigns to selected space", async () => {
   const { sm, runtime } = setup();
   const agent = sm.createAgentSpace("tabs");

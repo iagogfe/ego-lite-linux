@@ -96,6 +96,14 @@ function publicSpace(space: {
   };
 }
 
+type UrlMatchMode = "exact" | "origin" | "origin+path" | "includes";
+
+type ReusableTab = {
+  targetId: string;
+  title: string;
+  url: string;
+};
+
 /**
  * In-page agent overlay with two states, so a glance at the tab answers three
  * questions: is the agent acting now, is this its tab, and did it stop.
@@ -300,6 +308,50 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
     const targetId = await deps.getCdp().createTarget(url);
     deps.spaceManager.assignTarget(targetId);
     return { targetId };
+  }
+
+  /**
+   * Find an agent-owned tab by URL and move it into the selected agent space.
+   * User-owned and handed-off spaces are deliberately excluded.
+   */
+  async function findReusableTab(
+    params: {
+      url?: string;
+      match?: UrlMatchMode;
+    } = {},
+  ): Promise<ReusableTab | null> {
+    const selected = deps.spaceManager.selected();
+    if (!selected || selected.ownership !== "agent") {
+      return null;
+    }
+    if (typeof params?.url !== "string" || params.url === "") {
+      return null;
+    }
+
+    const match = isUrlMatchMode(params?.match) ? params.match : "origin";
+    const reusableIds = new Set(deps.spaceManager.targetsForReusableTabs());
+    const pages = await deps.getCdp().listPageTargets();
+    const selectedIds = new Set(selected.targetIds);
+    const matching = pages.filter(
+      (page) =>
+        reusableIds.has(page.targetId) &&
+        tabMatchesUrl(page.url, params.url!, match),
+    );
+    // Prefer a tab already in the selected space; otherwise reuse the latest
+    // matching agent tab returned by Chrome.
+    const existing =
+      matching.find((page) => selectedIds.has(page.targetId)) ||
+      matching[matching.length - 1];
+    if (!existing) {
+      return null;
+    }
+
+    deps.spaceManager.assignTarget(existing.targetId);
+    return {
+      targetId: existing.targetId,
+      title: existing.title,
+      url: existing.url,
+    };
   }
 
   async function snapshot(params: SnapshotOptions = {}): Promise<{
@@ -602,6 +654,8 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
         return listTabs();
       case "createTab":
         return createTab(params);
+      case "findReusableTab":
+        return findReusableTab(params);
       case "snapshot":
         return snapshot(params);
       case "sendCDPMessage":
@@ -619,4 +673,43 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
   }
 
   return { handle, onEvent, attachCdpForwarding };
+}
+
+function isUrlMatchMode(value: unknown): value is UrlMatchMode {
+  return (
+    value === "exact" ||
+    value === "origin" ||
+    value === "origin+path" ||
+    value === "includes"
+  );
+}
+
+function tabMatchesUrl(
+  tabUrl: string,
+  wantedUrl: string,
+  match: UrlMatchMode,
+): boolean {
+  if (!tabUrl) return false;
+  if (match === "includes") return tabUrl.includes(wantedUrl);
+
+  let tab: URL;
+  let wanted: URL;
+  try {
+    tab = new URL(tabUrl);
+    wanted = new URL(wantedUrl);
+  } catch {
+    return match === "exact" && tabUrl === wantedUrl;
+  }
+  if (match === "origin") return tab.origin === wanted.origin;
+  if (match === "origin+path") {
+    return (
+      tab.origin === wanted.origin &&
+      trimSlash(tab.pathname) === trimSlash(wanted.pathname)
+    );
+  }
+  return tab.href === wanted.href;
+}
+
+function trimSlash(pathname: string): string {
+  return pathname.replace(/\/+$/, "") || "/";
 }

@@ -119,6 +119,28 @@ test("installEgoClient maps createTab(url) and createTaskSpace(name)", async () 
   ]);
 });
 
+test("installEgoClient maps findReusableTab", async () => {
+  const conn = mockConn({
+    async request(method, params) {
+      if (method === "ego.findReusableTab") return { targetId: "t1" };
+      return { method, params };
+    },
+  });
+  installEgoClient(conn);
+
+  assert.deepEqual(
+    await (globalThis as any).ego.findReusableTab({
+      url: "https://example.com/new",
+      match: "origin",
+    }),
+    { targetId: "t1" },
+  );
+  assert.deepEqual(conn.calls[0], [
+    "ego.findReusableTab",
+    { url: "https://example.com/new", match: "origin" },
+  ]);
+});
+
 test("installEgoClient maps useTaskSpace and claimTaskSpace args", async () => {
   const conn = mockConn({
     async request(method, params) {

@@ -133,6 +133,12 @@ EOF
 - `fetch.server` performs Node-side requests; `fetch.browser` performs requests in the current page origin. Use `cdp` only as an escape hatch.
 - `console.log` is the output channel. Use `console.log(help('page'))`, `console.log(help('locator'))`, or another `help(name)` call when an exact signature is unclear.
 
+`browser.openOrReuseTab(url)` matches the same origin by default, so changing a
+site's path or query reuses its existing agent tab. Use
+`{ match: "exact" }` when separate URLs on the same site need separate tabs.
+Reuse may move a tab between agent-owned task spaces; user-owned and handed-off
+tabs are never selected automatically.
+
 ## Execution rules
 
 - `page.url()` is asynchronous in ego-browser; always use `await page.url()`. A `page.waitForURL(...)` predicate receives a `URL` object, so inspect `url.href`, `url.pathname`, or `url.searchParams`. It waits for `load` by default; use `waitUntil: 'commit'` only when intentionally proceeding before load.

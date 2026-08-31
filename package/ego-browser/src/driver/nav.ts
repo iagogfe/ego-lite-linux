@@ -174,7 +174,8 @@ export async function newTab(url = "about:blank") {
 }
 
 /**
- * Reuse an existing matching tab or open a new one.
+ * Reuse an existing matching tab or open a new one. By default, matching is
+ * done by origin so a site gets one agent tab even when its path/query changes.
  * @param {string} url URL to find or open.
  * @param {{match?: "exact"|"origin"|"origin+path"|"includes", wait?: boolean, timeout?: number, settle?: number}} [options]
  * @returns {Promise<{targetId:string,url:string,title:string,active:boolean,index?:number,reused:boolean}>}
@@ -184,7 +185,7 @@ export async function openOrReuseTab(
   options: OpenOrReuseTabOptions = {},
 ) {
   const tabs = await listTabs({ includeChrome: false });
-  const match = options.match || "exact";
+  const match = options.match || "origin";
   const existing = tabs.find((tab) => tabMatchesUrl(tab.url, url, match));
   if (existing) {
     await switchTab(existing.targetId);
@@ -197,6 +198,20 @@ export async function openOrReuseTab(
     }
     return { ...existing, active: true, reused: true };
   }
+
+  const reusable = await findReusableTabAcrossSpaces(url, match);
+  if (reusable) {
+    await switchTab(reusable.targetId);
+    if (options.wait) {
+      await waitForDocumentLoad({ timeout: options.timeout ?? 20000 });
+    }
+    const settle = Number(options.settle ?? 0);
+    if (settle > 0) {
+      await state.sleep(settle);
+    }
+    return { ...reusable, active: true, reused: true };
+  }
+
   const targetId = await newTab(url);
   if (options.wait !== false) {
     await waitForDocumentLoad({ timeout: options.timeout ?? 20000 });
@@ -206,6 +221,28 @@ export async function openOrReuseTab(
     await state.sleep(settle);
   }
   return { targetId, url, title: "", active: true, reused: false };
+}
+
+async function findReusableTabAcrossSpaces(
+  url: string,
+  match: UrlMatchMode,
+): Promise<{ targetId: string; title: string; url: string } | null> {
+  const ego = globalThis.ego;
+  if (!ego || typeof ego.findReusableTab !== "function") {
+    return null;
+  }
+  const tab = await ego.findReusableTab({ url, match });
+  if (!tab) return null;
+  if (typeof tab.targetId !== "string" || tab.targetId === "") {
+    throw new Error(
+      `findReusableTab returned an invalid tab: ${JSON.stringify(tab)}`,
+    );
+  }
+  return {
+    targetId: tab.targetId,
+    title: typeof tab.title === "string" ? tab.title : "",
+    url: typeof tab.url === "string" ? tab.url : url,
+  };
 }
 
 /**

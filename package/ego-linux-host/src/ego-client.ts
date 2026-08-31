@@ -183,6 +183,7 @@ export async function pingSocket(
 type EgoClient = {
   listTabs: () => Promise<any>;
   createTab: (url?: string) => Promise<any>;
+  findReusableTab: (params?: { url?: string; match?: string }) => Promise<any>;
   listTaskSpaces: () => Promise<any>;
   createTaskSpace: (name: string) => Promise<any>;
   useTaskSpace: (id: number) => Promise<any>;
@@ -212,6 +213,8 @@ export function installEgoClient(conn: HostConnection): void {
         "ego.createTab",
         typeof url === "string" ? { url } : ((url as any) ?? {}),
       ),
+    findReusableTab: (params = {}) =>
+      conn.request("ego.findReusableTab", params),
     listTaskSpaces: () => conn.request("ego.listTaskSpaces", {}),
     createTaskSpace: (name: string) =>
       conn.request("ego.createTaskSpace", { name }),

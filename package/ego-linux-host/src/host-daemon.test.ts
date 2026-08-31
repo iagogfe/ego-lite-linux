@@ -9,6 +9,7 @@ import { startDaemon, HOST_VERSION } from "./host-daemon.js";
 import { decodeLine, encodeRequest, isRpcResponse, LineBuffer } from "./rpc.js";
 import type { HostConfig } from "./config.js";
 import type { CdpBridge } from "./cdp-bridge.js";
+import { SpaceManager } from "./space-manager.js";
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   const dir = join(
@@ -209,6 +210,66 @@ test("daemon doctor and ego.listTaskSpaces without Chrome", async () => {
       });
       assert.equal(created.name, "from-rpc");
       assert.equal(created.ownership, "agent");
+    } finally {
+      await daemon.close();
+    }
+  });
+});
+
+test("daemon starts without restoring selection and reconciles persisted tabs", async () => {
+  await withTempDir(async (dir) => {
+    const config = testConfig(dir);
+    config.cdpPort = 1;
+    const spacesPath = join(dir, "spaces.json");
+    const seed = new SpaceManager(spacesPath);
+    const oldSpace = seed.createAgentSpace("old-job");
+    seed.use(oldSpace.id);
+    seed.assignTarget("live-agent-tab");
+    seed.assignTarget("closed-agent-tab");
+    await seed.save();
+
+    const pages = [
+      {
+        targetId: "live-agent-tab",
+        title: "Live",
+        url: "https://agent.example",
+        type: "page",
+      },
+      {
+        targetId: "new-user-tab",
+        title: "New user tab",
+        url: "https://user.example",
+        type: "page",
+      },
+    ];
+    const daemon = await startDaemon({
+      config,
+      spacesPath,
+      ensureChrome: async () => ({
+        pid: 0,
+        cdpPort: config.cdpPort,
+        userDataDir: config.userDataDir,
+        path: null,
+        async kill() {},
+      }),
+      connectCdp: async () => ({
+        ...fakeCdp(),
+        async listPageTargets() {
+          return pages;
+        },
+      }),
+    });
+    try {
+      assert.equal(daemon.spaceManager.selected(), null);
+      assert.deepEqual(
+        daemon.spaceManager.list().find((space) => space.id === oldSpace.id)
+          ?.targetIds,
+        ["live-agent-tab"],
+      );
+      assert.deepEqual(
+        daemon.spaceManager.list().find((space) => space.id === 1)?.targetIds,
+        ["new-user-tab"],
+      );
     } finally {
       await daemon.close();
     }

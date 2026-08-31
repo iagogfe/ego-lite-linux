@@ -177,6 +177,96 @@ test("openOrReuseTab settles a newly opened tab in milliseconds, not seconds", a
   assert.deepEqual(sleeps, [500]);
 });
 
+test("openOrReuseTab uses the same origin by default", async () => {
+  let createCalls = 0;
+  await withEgo(
+    {
+      async listTabs() {
+        return {
+          tabs: [
+            {
+              targetId: "target-existing",
+              active: false,
+              title: "Existing",
+              url: "https://example.com/old-path",
+            },
+          ],
+        };
+      },
+      async createTab() {
+        createCalls += 1;
+        return { targetId: "target-new" };
+      },
+    },
+    async () => {
+      const restore = setOverrides({
+        cdpOverride: async () => ({ success: true }),
+      });
+      try {
+        const opened = await openOrReuseTab(
+          "https://example.com/new-path?query=1",
+          { wait: false },
+        );
+        assert.equal(opened.targetId, "target-existing");
+        assert.equal(opened.reused, true);
+      } finally {
+        restore();
+      }
+    },
+  );
+  assert.equal(createCalls, 0);
+});
+
+test("openOrReuseTab asks the host for a matching tab in another space", async () => {
+  let moved = false;
+  let requested;
+  let createCalls = 0;
+  const tab = {
+    targetId: "target-other-space",
+    active: false,
+    title: "Existing elsewhere",
+    url: "https://example.com/old-path",
+  };
+
+  await withEgo(
+    {
+      async listTabs() {
+        return { tabs: moved ? [tab] : [] };
+      },
+      async findReusableTab(params) {
+        requested = params;
+        moved = true;
+        return tab;
+      },
+      async createTab() {
+        createCalls += 1;
+        return { targetId: "target-new" };
+      },
+    },
+    async () => {
+      const restore = setOverrides({
+        cdpOverride: async () => ({ success: true }),
+      });
+      try {
+        const opened = await openOrReuseTab(
+          "https://example.com/new-path?query=1",
+          { wait: false },
+        );
+        assert.equal(opened.targetId, tab.targetId);
+        assert.equal(opened.reused, true);
+      } finally {
+        restore();
+      }
+    },
+  );
+
+  assert.deepEqual(requested, {
+    url: "https://example.com/new-path?query=1",
+    match: "origin",
+  });
+  assert.equal(createCalls, 0);
+});
+
 test("switchTab refreshes the target list before activating it", async () => {
   const calls = [];
   await withEgo(
