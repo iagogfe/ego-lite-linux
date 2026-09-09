@@ -55,6 +55,7 @@ export type EgoRuntimeDeps = {
   stuckAfterMs?: number;
   /** How long the liveness probe waits (default 400ms). */
   probeTimeoutMs?: number;
+  recheckProbeMs?: number;
   /** Ceiling on a single focus turn (default 8s). */
   turnMaxMs?: number;
 };
@@ -665,6 +666,7 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
   const lastAlive = new Map<string, number>();
   /** A live tab answers this in milliseconds; a wedged one never does. */
   const PROBE_TIMEOUT_MS = deps.probeTimeoutMs ?? 150;
+  const RECHECK_PROBE_MS = deps.recheckProbeMs ?? 40;
   const stuckTabs = new Map<string, string>();
 
 
@@ -673,14 +675,17 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
    * reversible: a tab that recovers proves it on the next attempt, from any
    * process, without the agent having to close anything.
    */
-  async function tabAnswers(targetId: string): Promise<boolean> {
+  async function tabAnswers(
+    targetId: string,
+    budgetMs: number = PROBE_TIMEOUT_MS,
+  ): Promise<boolean> {
     try {
       const cdp = deps.getCdp();
       const sessionId = await cdp.attach(targetId);
       let timer: ReturnType<typeof setTimeout> | undefined;
       const probe = cdp.send("Page.getFrameTree", {}, sessionId);
       const timeout = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("probe timeout")), PROBE_TIMEOUT_MS);
+        timer = setTimeout(() => reject(new Error("probe timeout")), budgetMs);
         timer.unref?.();
       });
       try {
@@ -722,7 +727,11 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
   ): Promise<boolean> {
     const seen = lastAlive.get(targetId);
     if (seen !== undefined && Date.now() - seen < ALIVE_FOR_MS) return true;
-    if (await tabAnswers(targetId)) {
+    // A tab already known bad only has to prove it came back, and a live
+    // renderer answers this in ~1ms — so the recheck can be much tighter than
+    // the first verdict, which has to outlast a merely busy main thread.
+    const budget = stuckTabs.has(targetId) ? RECHECK_PROBE_MS : PROBE_TIMEOUT_MS;
+    if (await tabAnswers(targetId, budget)) {
       lastAlive.set(targetId, Date.now());
       clearTabStuck(targetId);
       return true;
