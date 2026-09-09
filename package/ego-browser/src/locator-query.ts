@@ -128,6 +128,51 @@ function parseInternalJson<T>(selector: string, kind: string): T | null {
   }
 }
 
+/**
+ * Render a selector the way the agent wrote it. Internal forms
+ * (`internal:nth=0;...`, `internal:role:{...}`) are an implementation detail of
+ * the locator facade and must not appear in an error an agent has to act on.
+ */
+export function describeSelector(selector: unknown): string {
+  const raw = String(selector);
+  const nth = parseInternalNth(raw);
+  if (nth) {
+    const where =
+      nth.index === "last" ? "last match" : `match #${Number(nth.index) + 1}`;
+    return `${describeSelector(nth.selector)} (${where})`;
+  }
+  const scope = parseInternalJson<InternalScope>(raw, "scope");
+  if (scope) {
+    return `${describeSelector(scope.base)} >> ${describeSelector(scope.child)}`;
+  }
+  const filter = parseInternalJson<InternalFilter>(raw, "filter");
+  if (filter) {
+    return `${describeSelector(filter.base)} (filtered)`;
+  }
+  const role = parseInternalJson<any>(raw, "role");
+  if (role) {
+    const name = role?.name?.text ?? role?.name;
+    return typeof name === "string" && name !== ""
+      ? `role:${role.role}[name=${JSON.stringify(name)}]`
+      : `role:${role?.role}`;
+  }
+  for (const kind of [
+    "text",
+    "label",
+    "placeholder",
+    "alt",
+    "title",
+    "testid",
+  ]) {
+    const parsed = parseInternalJson<any>(raw, kind);
+    if (parsed) {
+      const value = parsed?.text ?? parsed?.value ?? parsed;
+      return `${kind}=${JSON.stringify(typeof value === "string" ? value : String(value))}`;
+    }
+  }
+  return raw;
+}
+
 function parseInternalNth(selector) {
   const nthMatch = /^internal:nth=(\d+);([\s\S]+)$/.exec(String(selector));
   if (nthMatch) return { index: Number(nthMatch[1]), selector: nthMatch[2] };
@@ -341,11 +386,42 @@ function attributeElementsExpression(
   return `${querySelectorAllExpression(rootExpression, selector)}.filter((el) => ${match})`;
 }
 
+/**
+ * ARIA roles plus the internal roles Chrome's accessibility tree prints in a
+ * snapshot. A role outside this set is a typo, and a typo used to read as
+ * "no matches" — the silent-count trap this API keeps closing.
+ *
+ * ponytail: a list, refreshed by hand. If a real page ever needs a role that is
+ * missing here, add it; the error names the escape hatches meanwhile.
+ */
+const KNOWN_ROLES = new Set(
+  (
+    "alert alertdialog application article associationlist banner blockquote button caption cell checkbox code columnheader combobox comment complementary contentinfo definition deletion dialog directory document emphasis feed figure form generic grid gridcell group heading image img insertion link list listbox listitem log main marquee math menu menubar menuitem menuitemcheckbox menuitemradio meter navigation none note option paragraph presentation progressbar radio radiogroup region row rowgroup rowheader scrollbar search searchbox separator slider spinbutton status strong subscript suggestion superscript switch tab table tablist tabpanel term textbox time timer toolbar tooltip tree treegrid treeitem " +
+    "RootWebArea StaticText InlineTextBox LineBreak ListMarker LabelText LegacyLayout Iframe IframePresentational Pre Canvas Video Audio Abbr Details Summary DisclosureTriangle DescriptionList DescriptionListDetail DescriptionListTerm EmbeddedObject FigureCaption Footer Header Legend Mark Ruby SvgRoot"
+  ).split(/\s+/),
+);
+
+export function assertKnownRole(role: string) {
+  if (KNOWN_ROLES.has(role)) return;
+  const lower = role.toLowerCase();
+  const close = [...KNOWN_ROLES].filter(
+    (known) =>
+      known.toLowerCase().startsWith(lower.slice(0, 3)) ||
+      lower.startsWith(known.toLowerCase().slice(0, 3)),
+  );
+  throw new Error(
+    `Unknown role ${JSON.stringify(role)}: it is not an ARIA role or an accessibility-tree role this build knows, so it can only ever match nothing.` +
+      (close.length ? ` Closest known: ${close.slice(0, 5).join(", ")}.` : "") +
+      ` Run page.snapshot() and copy a role from a row, or locate the element another way (CSS, page.getByText(...)).`,
+  );
+}
+
 function parseRoleLocator(value: string) {
   const roleMatch = /^role:([A-Za-z0-9_-]+)(?:\[name=(.+)\])?$/.exec(value);
   if (!roleMatch) {
     return null;
   }
+  assertKnownRole(roleMatch[1]);
   return {
     role: roleMatch[1],
     name:
@@ -382,6 +458,7 @@ function roleElementsExpression(locator, rootExpression = "document") {
       const implicitRole = (() => {
         const tag = el.tagName.toLowerCase();
         const type = (el.getAttribute('type') || '').toLowerCase();
+        const named = el.hasAttribute('aria-label') || el.hasAttribute('aria-labelledby') || el.hasAttribute('title');
         if (tag === 'button') return 'button';
         if (tag === 'a' && el.hasAttribute('href')) return 'link';
         if (tag === 'textarea') return 'textbox';
@@ -395,6 +472,40 @@ function roleElementsExpression(locator, rootExpression = "document") {
           if (type === 'range') return 'slider';
           return 'textbox';
         }
+        if (tag === 'table') return 'table';
+        if (tag === 'tr') return 'row';
+        if (tag === 'td') return 'cell';
+        if (tag === 'th') return el.getAttribute('scope') === 'row' ? 'rowheader' : 'columnheader';
+        if (tag === 'thead' || tag === 'tbody' || tag === 'tfoot') return 'rowgroup';
+        if (tag === 'caption') return 'caption';
+        if (tag === 'ul' || tag === 'ol') return 'list';
+        if (tag === 'li') return 'listitem';
+        if (tag === 'dl') return 'list';
+        if (tag === 'p') return 'paragraph';
+        if (tag === 'code') return 'code';
+        if (tag === 'pre') return 'generic';
+        if (tag === 'blockquote') return 'blockquote';
+        if (tag === 'figure') return 'figure';
+        if (tag === 'figcaption') return 'caption';
+        if (tag === 'hr') return 'separator';
+        // A section/aside/form is only a landmark once it has a name.
+        if (tag === 'section') return named ? 'region' : 'generic';
+        if (tag === 'aside') return 'complementary';
+        if (tag === 'nav') return 'navigation';
+        if (tag === 'main') return 'main';
+        if (tag === 'article') return 'article';
+        if (tag === 'form') return named ? 'form' : 'generic';
+        if (tag === 'fieldset') return 'group';
+        if (tag === 'legend') return 'caption';
+        if (tag === 'header') return el.closest('article, aside, main, nav, section') ? 'generic' : 'banner';
+        if (tag === 'footer') return el.closest('article, aside, main, nav, section') ? 'generic' : 'contentinfo';
+        if (tag === 'dialog') return 'dialog';
+        if (tag === 'details') return 'group';
+        if (tag === 'summary') return 'button';
+        if (tag === 'progress') return 'progressbar';
+        if (tag === 'meter') return 'meter';
+        if (tag === 'output') return 'status';
+        if (tag === 'time') return 'time';
         return '';
       })();
       const role = explicitRole || implicitRole;
@@ -441,6 +552,28 @@ function isTextMatcher(value): value is TextMatcher {
   );
 }
 
+/**
+ * Tags that can carry an implicit ARIA role we understand. Anything not listed
+ * here can still match through an explicit `role=` attribute.
+ *
+ * ponytail: a lookup table, not the full ARIA role algorithm — enough for the
+ * roles a snapshot actually prints. Widen the table when a real page needs a
+ * role it does not cover.
+ */
 function roleCandidateSelector() {
-  return "button, a[href], input, textarea, select, img[alt], h1, h2, h3, h4, h5, h6, [role]";
+  return [
+    "button",
+    "a[href]",
+    "input",
+    "textarea",
+    "select",
+    "img[alt]",
+    "h1, h2, h3, h4, h5, h6",
+    "table, tr, td, th, thead, tbody, tfoot, caption",
+    "ul, ol, li, dl",
+    "p, code, pre, blockquote, figure, figcaption, hr",
+    "section, article, aside, nav, main, header, footer, form, fieldset, legend",
+    "dialog, details, summary, progress, meter, output, time",
+    "[role]",
+  ].join(", ");
 }

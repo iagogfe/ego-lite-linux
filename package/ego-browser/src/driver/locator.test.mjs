@@ -193,7 +193,14 @@ test("role locators use AX regex accessible names in collection queries", async 
   const restore = setOverrides({
     cdpOverride(method, params) {
       calls.push({ method, params });
-      if (method === "Accessibility.getFullAXTree") {
+      if (method === "DOM.getDocument") {
+        return { root: { backendNodeId: 1 } };
+      }
+      if (method === "Accessibility.queryAXTree") {
+        // Chrome does the role filtering; a regex name is matched in Node, so
+        // no accessibleName is sent for it.
+        assert.equal(params.role, "button");
+        assert.equal("accessibleName" in params, false);
         return {
           nodes: [
             {
@@ -201,8 +208,16 @@ test("role locators use AX regex accessible names in collection queries", async 
               name: { value: "Proceed to Checkout" },
               backendDOMNodeId: 101,
             },
+            {
+              role: { value: "button" },
+              name: { value: "Cancel" },
+              backendDOMNodeId: 102,
+            },
           ],
         };
+      }
+      if (method === "Accessibility.getFullAXTree") {
+        throw new Error("the whole AX tree must not be fetched per query");
       }
       throw new Error(`Unexpected CDP method: ${method}`);
     },
@@ -214,8 +229,41 @@ test("role locators use AX regex accessible names in collection queries", async 
   }
   assert.deepEqual(
     calls.map((call) => call.method),
-    ["Accessibility.getFullAXTree"],
+    ["DOM.getDocument", "Accessibility.queryAXTree"],
   );
+});
+
+test("a role query falls back to the full AX tree when the query is unavailable", async () => {
+  const calls = [];
+  const restore = setOverrides({
+    cdpOverride(method) {
+      calls.push(method);
+      if (method === "DOM.getDocument") return { root: { backendNodeId: 1 } };
+      if (method === "Accessibility.queryAXTree") {
+        throw new Error("not supported here");
+      }
+      if (method === "Accessibility.getFullAXTree") {
+        return {
+          nodes: [
+            {
+              role: { value: "button" },
+              name: { value: "Submit" },
+              backendDOMNodeId: 7,
+            },
+            // No DOM node behind it: skipped, never an error.
+            { role: { value: "button" }, name: { value: "Submit" } },
+          ],
+        };
+      }
+      throw new Error(`Unexpected CDP method: ${method}`);
+    },
+  });
+  try {
+    assert.equal(await count('loc=role:button[name="Submit"]'), 1);
+  } finally {
+    restore();
+  }
+  assert.ok(calls.includes("Accessibility.getFullAXTree"));
 });
 
 test("role collections use the same AX match set as nth element operations", async () => {
@@ -245,6 +293,10 @@ test("role collections use the same AX match set as nth element operations", asy
         return { object: { objectId: `node-${params.backendNodeId}` } };
       }
       if (method === "Runtime.callFunctionOn") {
+        if (/isConnected/.test(params.functionDeclaration)) {
+          // Liveness/promotion hop shared by ref and role locators.
+          return { result: { objectId: params.objectId } };
+        }
         if (params.functionDeclaration.includes("innerText target")) {
           assert.equal(params.objectId, "node-200");
           return { result: { value: "House 2" } };
@@ -455,6 +507,10 @@ test("evaluateAll supports refs as a single-element array", async () => {
         return { object: { objectId: "node-1" } };
       }
       if (method === "Runtime.callFunctionOn") {
+        if (/isConnected/.test(params.functionDeclaration)) {
+          // The liveness guard: a ref must not read a detached node.
+          return { result: { objectId: "node-1" } };
+        }
         assert.match(
           params.functionDeclaration,
           /pageFunction\(\[this\], arg\)/,
@@ -499,4 +555,113 @@ test("count treats a resolved ref as one element", async () => {
   }
   assert.equal(calls[0].method, "DOM.resolveNode");
   assert.equal(calls.at(-1).method, "Runtime.releaseObject");
+});
+
+test("an element read waits 3s implicitly, not the full default timeout", async () => {
+  // Measured on the real host: the full 10s default made every miss cost 10s
+  // against a 0.07s hit, and no signal separates "not yet" from "not there".
+  let clock = 0;
+  const restore = setOverrides({
+    now: () => clock,
+    sleep: async (ms) => {
+      clock += ms;
+    },
+    // No objectId ever: the element is simply not on the page.
+    cdpOverride: async () => ({ result: {} }),
+  });
+  try {
+    await assert.rejects(
+      () => innerText("#never"),
+      /No element matches #never after waiting 3000ms.*page\.waitForSelector/s,
+    );
+    assert.equal(clock, 3000);
+
+    // setDefaultTimeout still shortens it; it just cannot inflate it.
+    clock = 0;
+    const shorter = setOverrides({ defaultTimeout: 500 });
+    try {
+      await assert.rejects(() => innerText("#never"), /after waiting 500ms/);
+      assert.equal(clock, 500);
+    } finally {
+      shorter();
+    }
+  } finally {
+    restore();
+  }
+});
+
+test("the disambiguated locator a snapshot row prints resolves to that match", async () => {
+  const restore = setOverrides({
+    cdpOverride(method, params) {
+      if (method === "DOM.getDocument") return { root: { backendNodeId: 1 } };
+      if (method === "Accessibility.queryAXTree") {
+        return {
+          nodes: [
+            {
+              role: { value: "link" },
+              name: { value: "Jump up" },
+              backendDOMNodeId: 10,
+            },
+            {
+              role: { value: "link" },
+              name: { value: "Jump up" },
+              backendDOMNodeId: 12,
+            },
+          ],
+        };
+      }
+      if (method === "DOM.resolveNode") {
+        return {
+          object: {
+            objectId: `node-${params.backendNodeId}`,
+            className: "HTMLAnchorElement",
+          },
+        };
+      }
+      if (method === "Runtime.callFunctionOn") {
+        if (/isConnected/.test(params.functionDeclaration)) {
+          return { result: { objectId: params.objectId } };
+        }
+        return { result: { value: params.objectId } };
+      }
+      return {};
+    },
+  });
+  try {
+    assert.equal(
+      await innerText('loc=role:link[name="Jump up"] >> nth=1'),
+      "node-12",
+    );
+    assert.equal(
+      await innerText('loc=role:link[name="Jump up"] >> nth=0'),
+      "node-10",
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("a zero-sized element is not visible, and the click says what to do", async () => {
+  // Wikipedia's [edit] anchors are inline-block with height 0: checkVisibility
+  // called them visible while the click had no box to aim at.
+  const restore = setOverrides({
+    cdpOverride: async (method, params) => {
+      if (
+        method === "Runtime.evaluate" &&
+        params.objectGroup === "ego-browser"
+      ) {
+        return { result: { objectId: "node-1" } };
+      }
+      if (method === "Runtime.callFunctionOn") {
+        // The visibility probe: CSS-visible, but zero-sized.
+        return { result: { value: false } };
+      }
+      return {};
+    },
+  });
+  try {
+    assert.equal(await isVisible("#zero"), false);
+  } finally {
+    restore();
+  }
 });

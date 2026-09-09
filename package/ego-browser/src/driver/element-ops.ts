@@ -12,7 +12,7 @@ import { resolveElementObjectId } from "../element-resolver.js";
  */
 export async function resolveHandle(selectorOrRef) {
   await ensureRefMapForRef(selectorOrRef);
-  return resolveElementObjectId(
+  return await resolveElementObjectId(
     { sendRaw: cdp },
     undefined,
     browserRefMap,
@@ -65,7 +65,7 @@ export async function resolveAndCall(
   functionDeclaration,
   args = [],
 ) {
-  return withHandle(selectorOrRef, async ({ objectId, sessionId }) => {
+  return await withHandle(selectorOrRef, async ({ objectId, sessionId }) => {
     const result = await cdp(
       "Runtime.callFunctionOn",
       {

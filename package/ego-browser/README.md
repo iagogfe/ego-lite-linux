@@ -24,6 +24,8 @@ console.log(await page.snapshot())
 EOF
 ```
 
+`browser.openOrReuseTab(url)` reuses an agent-owned tab from the same origin by default. Use `{ match: 'exact' }` when different URLs on the same site need separate tabs. User-owned and handed-off tabs are not selected automatically.
+
 Local invocation without the browser (for debugging the helper bundle itself) reads stdin:
 
 ```bash

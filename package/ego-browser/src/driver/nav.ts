@@ -45,6 +45,7 @@ type OpenOrReuseTabOptions = {
   wait?: boolean;
   timeout?: number;
   settle?: number;
+  reload?: boolean;
 };
 
 type TabTarget = string | { targetId: string };
@@ -58,6 +59,13 @@ type TabTarget = string | { targetId: string };
  * @returns {Promise<{navigation: object, loaded: boolean}>}
  */
 export async function goto(url: string, options: GotoOptions = {}) {
+  try {
+    new URL(url);
+  } catch {
+    throw new Error(
+      `page.goto needs an absolute URL with a scheme; received ${JSON.stringify(url)}. Write "https://${String(url).replace(/^\/+/, "")}" or use browser.openOrReuseTab(url).`,
+    );
+  }
   const navigation = await cdp("Page.navigate", { url });
   const loaded =
     options.waitUntil === "commit"
@@ -170,67 +178,89 @@ export async function newTab(url = "about:blank") {
   if (!result.targetId) {
     throw new Error("newTab returned no targetId");
   }
+  // The CLI path never goes through installEgoSdk's createTab wrapper, so the
+  // new tab must become `page` here, for every caller.
+  invalidateSession();
+  setPreferredTarget(result.targetId);
   return result.targetId;
 }
 
 /**
  * Reuse an existing matching tab or open a new one. By default, matching is
- * done by origin so a site gets one agent tab even when its path/query changes.
+ * done by origin so a site gets one agent tab even when its path/query changes;
+ * a reused tab is navigated to `url` when it is on a different URL.
  * @param {string} url URL to find or open.
- * @param {{match?: "exact"|"origin"|"origin+path"|"includes", wait?: boolean, timeout?: number, settle?: number}} [options]
+ * @param {{match?: "exact"|"origin"|"origin+path"|"includes", wait?: boolean, timeout?: number, settle?: number, reload?: boolean}} [options]
+ *   Reusing a tab already on `url` keeps the page exactly as it is, including
+ *   anything a previous script changed in the DOM. Pass `reload: true` for a
+ *   clean copy of the page.
  * @returns {Promise<{targetId:string,url:string,title:string,active:boolean,index?:number,reused:boolean}>}
  */
 export async function openOrReuseTab(
   url: string,
   options: OpenOrReuseTabOptions = {},
 ) {
+  // Without this an empty string spent the whole timeout and then reported
+  // "waiting for  to load".
+  if (typeof url !== "string" || url.trim() === "") {
+    throw new Error(
+      `openOrReuseTab requires a URL; received ${JSON.stringify(url)}`,
+    );
+  }
+  try {
+    new URL(url);
+  } catch {
+    throw new Error(
+      `openOrReuseTab requires an absolute URL (with a scheme); received ${JSON.stringify(url)}`,
+    );
+  }
   const tabs = await listTabs({ includeChrome: false });
   const match = options.match || "origin";
-  const existing = tabs.find((tab) => tabMatchesUrl(tab.url, url, match));
-  const reusable = existing ?? (await findReusableTabAcrossSpaces(url, match));
+  // Reuse never leaves the selected task space: listTabs() is already scoped to
+  // it, and taking a tab from another agent's space would silently hand this
+  // script someone else's page (and empty their space).
+  const reusable = tabs.find((tab) => tabMatchesUrl(tab.url, url, match));
   if (reusable) {
     await switchTab(reusable.targetId);
-    if (options.wait) {
-      await waitForDocumentLoad({ timeout: options.timeout ?? 20000 });
+    if (tabMatchesUrl(reusable.url, url, "exact") && !options.reload) {
+      if (options.wait) {
+        assertLoaded(
+          await waitForDocumentLoad({ timeout: options.timeout ?? 20000 }),
+          url,
+          options.timeout ?? 20000,
+        );
+      }
+    } else {
+      // Reuse is about the tab, not the page: a same-origin tab on another
+      // path still has to end up on the requested URL.
+      const { loaded } = await goto(url, {
+        timeout: options.timeout ?? 20000,
+        waitUntil: options.wait === false ? "commit" : "load",
+      });
+      if (options.wait !== false) {
+        assertLoaded(loaded, url, options.timeout ?? 20000);
+      }
     }
     const settle = Number(options.settle ?? 0);
     if (settle > 0) {
       await state.sleep(settle);
     }
-    return { ...reusable, active: true, reused: true };
+    return { ...reusable, url, active: true, reused: true };
   }
 
   const targetId = await newTab(url);
   if (options.wait !== false) {
-    await waitForDocumentLoad({ timeout: options.timeout ?? 20000 });
+    assertLoaded(
+      await waitForDocumentLoad({ timeout: options.timeout ?? 20000 }),
+      url,
+      options.timeout ?? 20000,
+    );
   }
   const settle = Number(options.settle ?? 0);
   if (settle > 0) {
     await state.sleep(settle);
   }
   return { targetId, url, title: "", active: true, reused: false };
-}
-
-async function findReusableTabAcrossSpaces(
-  url: string,
-  match: UrlMatchMode,
-): Promise<{ targetId: string; title: string; url: string } | null> {
-  const ego = globalThis.ego;
-  if (!ego || typeof ego.findReusableTab !== "function") {
-    return null;
-  }
-  const tab = await ego.findReusableTab({ url, match });
-  if (!tab) return null;
-  if (typeof tab.targetId !== "string" || tab.targetId === "") {
-    throw new Error(
-      `findReusableTab returned an invalid tab: ${JSON.stringify(tab)}`,
-    );
-  }
-  return {
-    targetId: tab.targetId,
-    title: typeof tab.title === "string" ? tab.title : "",
-    url: typeof tab.url === "string" ? tab.url : url,
-  };
 }
 
 /**
@@ -278,6 +308,78 @@ export async function ensureRealTab() {
 }
 
 /**
+ * Go back one entry in this tab's history.
+ * @param {{timeout?: number, waitUntil?: "load"|"domcontentloaded"|"commit"}} [options]
+ * @returns {Promise<{url:string, loaded:boolean}|null>} Null when there is nothing to go back to.
+ */
+export async function goBack(options: GotoOptions = {}) {
+  return await historyGo(-1, options);
+}
+
+/**
+ * Go forward one entry in this tab's history.
+ * @param {{timeout?: number, waitUntil?: "load"|"domcontentloaded"|"commit"}} [options]
+ * @returns {Promise<{url:string, loaded:boolean}|null>} Null when there is nothing to go forward to.
+ */
+export async function goForward(options: GotoOptions = {}) {
+  return await historyGo(1, options);
+}
+
+async function historyGo(delta: number, options: GotoOptions) {
+  const history = await cdp("Page.getNavigationHistory");
+  const entries = history?.entries || [];
+  const index = Number(history?.currentIndex ?? -1) + delta;
+  const entry = entries[index];
+  if (!entry) return null;
+  await cdp("Page.navigateToHistoryEntry", { entryId: entry.id });
+  const loaded =
+    options.waitUntil === "commit"
+      ? false
+      : await waitForDocumentLoad({
+          timeout: options.timeout ?? 20000,
+          until:
+            options.waitUntil === "domcontentloaded"
+              ? "domcontentloaded"
+              : "load",
+        });
+  return { url: String(entry.url || ""), loaded };
+}
+
+/**
+ * Resize the viewport of the current tab. Headless Chrome starts at 800x600,
+ * which hides responsive controls (a site's search box can collapse to 0x0 and
+ * drop out of the accessibility tree entirely).
+ * @param {{width:number,height:number,deviceScaleFactor?:number,mobile?:boolean}} size Viewport size in CSS pixels.
+ * @returns {Promise<{width:number,height:number}>} The applied size.
+ */
+export async function setViewportSize(size: {
+  width: number;
+  height: number;
+  deviceScaleFactor?: number;
+  mobile?: boolean;
+}) {
+  const width = Number(size?.width);
+  const height = Number(size?.height);
+  if (
+    !Number.isFinite(width) ||
+    !Number.isFinite(height) ||
+    width <= 0 ||
+    height <= 0
+  ) {
+    throw new Error(
+      `page.setViewportSize requires { width, height } in CSS pixels; received ${JSON.stringify(size)}`,
+    );
+  }
+  await cdp("Emulation.setDeviceMetricsOverride", {
+    width: Math.round(width),
+    height: Math.round(height),
+    deviceScaleFactor: Number(size?.deviceScaleFactor ?? 1),
+    mobile: Boolean(size?.mobile ?? false),
+  });
+  return { width: Math.round(width), height: Math.round(height) };
+}
+
+/**
  * Find an iframe target whose URL contains a substring.
  * @param {string} urlSubstring URL substring to match.
  * @returns {Promise<string|null>} Matching iframe target id, if any.
@@ -290,6 +392,15 @@ export async function iframeTarget(urlSubstring) {
         target.type === "iframe" && (target.url || "").includes(urlSubstring),
     )?.targetId || null
   );
+}
+
+/** A wait the caller asked for and did not get is a failure, not a result. */
+function assertLoaded(loaded: boolean, url: string, timeout: number) {
+  if (!loaded) {
+    throw new Error(
+      `timed out after ${timeout}ms waiting for ${url} to load; the tab is still on the previous page`,
+    );
+  }
 }
 
 function tabMatchesUrl(tabUrl: string, wantedUrl: string, match: UrlMatchMode) {

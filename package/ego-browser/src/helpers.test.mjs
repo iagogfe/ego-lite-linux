@@ -561,7 +561,7 @@ test("claimTaskSpace throws on an unknown task space", async () => {
     async () => {
       await assert.rejects(
         () => claimTaskSpace("checkout-flow"),
-        /task space not found: checkout-flow/,
+        /task space not found: "checkout-flow".*taskSpaces\.useOrCreate/s,
       );
     },
   );
@@ -995,4 +995,34 @@ test("waitForAgentControl propagates non-user-control snapshot errors", async ()
       );
     },
   );
+});
+
+test("a ref cannot be the parent of a nested locator, and says what to do", () => {
+  const { page } = helperExports.helperContext();
+  assert.throws(
+    () => page.locator("@1522").getByRole("link"),
+    /@1522 cannot be used as the parent.*locator\("@1522"\)\.snapshot\(\)/s,
+  );
+  assert.throws(
+    () => page.locator("@1522").locator("a"),
+    /cannot be used as the parent/,
+  );
+  // A malformed ref used to reach querySelectorAll and dump the generated code.
+  assert.throws(
+    () => page.locator("@N").getByRole("link"),
+    /@N is not a valid ref.*page\.snapshot\(\)/s,
+  );
+});
+
+test("a misspelled role is refused, a real one is not", () => {
+  const { page } = helperExports.helperContext();
+  assert.throws(
+    () => page.getByRole("buton", { name: "Save" }),
+    /Unknown role "buton".*Closest known: button.*page\.snapshot\(\)/s,
+  );
+  assert.throws(() => page.getByRole("notarole"), /Unknown role "notarole"/);
+  // Real ARIA roles and the tree's own internal roles keep working.
+  for (const role of ["button", "rowgroup", "StaticText", "RootWebArea"]) {
+    assert.doesNotThrow(() => page.getByRole(role));
+  }
 });

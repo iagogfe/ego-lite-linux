@@ -141,6 +141,25 @@ test("newTab throws when the binding returns no targetId", async () => {
   );
 });
 
+test("newTab makes the new tab the session target, even without the SDK wrapper", async () => {
+  state.sessionId = "stale-session";
+  state.sessionTargetId = "old-tab";
+  state.sessionAt = Date.now();
+  await withEgo(
+    {
+      async createTab() {
+        return { targetId: "new-tab" };
+      },
+    },
+    async () => {
+      assert.equal(await newTab("https://example.com/"), "new-tab");
+      assert.equal(state.sessionId, null);
+      assert.equal(state.preferredTargetId, "new-tab");
+    },
+  );
+  state.preferredTargetId = null;
+});
+
 test("openOrReuseTab settles a newly opened tab in milliseconds, not seconds", async () => {
   // Regression: the new-tab branch used to sleep(settle * 1000), so settle:500
   // (documented as 500ms) blocked for 500 seconds while the reuse branch
@@ -217,29 +236,114 @@ test("openOrReuseTab uses the same origin by default", async () => {
   assert.equal(createCalls, 0);
 });
 
-test("openOrReuseTab asks the host for a matching tab in another space", async () => {
-  let moved = false;
-  let requested;
-  let createCalls = 0;
-  const tab = {
-    targetId: "target-other-space",
-    active: false,
-    title: "Existing elsewhere",
-    url: "https://example.com/old-path",
-  };
-
+test("openOrReuseTab reloads the reused tab only when asked", async () => {
+  const tabs = [
+    {
+      targetId: "target-existing",
+      active: true,
+      title: "Existing",
+      url: "https://example.com/page",
+    },
+  ];
+  const navigations = [];
   await withEgo(
     {
       async listTabs() {
-        return { tabs: moved ? [tab] : [] };
+        return { tabs };
       },
-      async findReusableTab(params) {
-        requested = params;
-        moved = true;
-        return tab;
+    },
+    async () => {
+      const restore = setOverrides({
+        cdpOverride: async (method, params) => {
+          if (method === "Page.navigate") navigations.push(params.url);
+          return { success: true };
+        },
+      });
+      try {
+        // Same URL: reuse keeps the page (and whatever a previous script did to it).
+        await openOrReuseTab("https://example.com/page", { wait: false });
+        assert.deepEqual(navigations, []);
+
+        await openOrReuseTab("https://example.com/page", {
+          wait: false,
+          reload: true,
+        });
+        assert.deepEqual(navigations, ["https://example.com/page"]);
+      } finally {
+        restore();
+      }
+    },
+  );
+});
+
+test("openOrReuseTab navigates a reused tab when it sits on another URL", async () => {
+  const tabs = [
+    {
+      targetId: "target-existing",
+      active: true,
+      title: "Existing",
+      url: "https://example.com/old-path",
+    },
+  ];
+  const cdpCalls = [];
+  await withEgo(
+    {
+      async listTabs() {
+        return { tabs };
       },
-      async createTab() {
-        createCalls += 1;
+    },
+    async () => {
+      const restore = setOverrides({
+        cdpOverride: async (method, params) => {
+          cdpCalls.push([method, params?.url]);
+          return { success: true };
+        },
+      });
+      try {
+        const opened = await openOrReuseTab("https://example.com/new-path", {
+          wait: false,
+        });
+        assert.equal(opened.reused, true);
+        assert.equal(opened.url, "https://example.com/new-path");
+        assert.deepEqual(
+          cdpCalls.filter(([m]) => m === "Page.navigate"),
+          [["Page.navigate", "https://example.com/new-path"]],
+        );
+
+        cdpCalls.length = 0;
+        tabs[0].url = "https://example.com/new-path";
+        await openOrReuseTab("https://example.com/new-path", { wait: false });
+        assert.equal(
+          cdpCalls.some(([m]) => m === "Page.navigate"),
+          false,
+        );
+      } finally {
+        restore();
+      }
+    },
+  );
+});
+
+test("openOrReuseTab never takes a tab from another task space", async () => {
+  // The space has no matching tab; the host offers one from a neighbour space.
+  // Taking it would give this script someone else's page and empty their space.
+  let createdUrl;
+  let askedHost = false;
+  await withEgo(
+    {
+      async listTabs() {
+        return { tabs: [] };
+      },
+      async findReusableTab() {
+        askedHost = true;
+        return {
+          targetId: "target-other-space",
+          title: "Someone else's page",
+          url: "https://example.com/their-page",
+        };
+      },
+      async createTab(url) {
+        createdUrl = url;
         return { targetId: "target-new" };
       },
     },
@@ -248,23 +352,105 @@ test("openOrReuseTab asks the host for a matching tab in another space", async (
         cdpOverride: async () => ({ success: true }),
       });
       try {
-        const opened = await openOrReuseTab(
-          "https://example.com/new-path?query=1",
-          { wait: false },
-        );
-        assert.equal(opened.targetId, tab.targetId);
-        assert.equal(opened.reused, true);
+        const opened = await openOrReuseTab("https://example.com/mine", {
+          wait: false,
+        });
+        assert.equal(opened.reused, false);
+        assert.equal(opened.targetId, "target-new");
       } finally {
         restore();
       }
     },
   );
+  assert.equal(askedHost, false);
+  assert.equal(createdUrl, "https://example.com/mine");
+});
 
-  assert.deepEqual(requested, {
-    url: "https://example.com/new-path?query=1",
-    match: "origin",
-  });
-  assert.equal(createCalls, 0);
+test("openOrReuseTab leaves the tabs of another space alone", async () => {
+  // Sequential rounds: space A opened these two, space B now wants the same
+  // origin. B must open its own tab and leave A's list untouched.
+  const spaceATabs = [
+    {
+      targetId: "a-example",
+      active: false,
+      title: "Example",
+      url: "https://example.com/",
+    },
+    {
+      targetId: "a-wiki",
+      active: true,
+      title: "Main Page",
+      url: "https://en.wikipedia.org/wiki/Main_Page",
+    },
+  ];
+  await withEgo(
+    {
+      // listTabs is scoped to the selected space: space B sees nothing.
+      async listTabs() {
+        return { tabs: [] };
+      },
+      async findReusableTab() {
+        throw new Error("openOrReuseTab must not ask for another space's tabs");
+      },
+      async createTab() {
+        return { targetId: "b-wiki" };
+      },
+    },
+    async () => {
+      const restore = setOverrides({
+        cdpOverride: async () => ({ success: true }),
+      });
+      try {
+        const opened = await openOrReuseTab(
+          "https://en.wikipedia.org/wiki/Linux",
+          { wait: false },
+        );
+        assert.equal(opened.targetId, "b-wiki");
+        assert.equal(opened.reused, false);
+      } finally {
+        restore();
+      }
+    },
+  );
+  assert.deepEqual(
+    spaceATabs.map((tab) => tab.targetId),
+    ["a-example", "a-wiki"],
+  );
+});
+
+test("openOrReuseTab fails when a requested wait does not complete", async () => {
+  await withEgo(
+    {
+      async listTabs() {
+        return { tabs: [] };
+      },
+      async createTab() {
+        return { targetId: "target-new" };
+      },
+    },
+    async () => {
+      const restore = setOverrides({
+        // readyState never reaches "complete": the wait must not report success.
+        cdpOverride: async (method) =>
+          method === "Runtime.evaluate"
+            ? { result: { value: "loading" } }
+            : { success: true },
+        sleep: async () => {},
+      });
+      try {
+        await assert.rejects(
+          () =>
+            openOrReuseTab("https://example.com/slow", {
+              wait: true,
+              timeout: 1,
+            }),
+          /timed out after 1ms waiting for https:\/\/example\.com\/slow to load/,
+        );
+      } finally {
+        restore();
+      }
+    },
+  );
 });
 
 test("switchTab refreshes the target list before activating it", async () => {

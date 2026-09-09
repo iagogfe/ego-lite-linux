@@ -1,6 +1,8 @@
 import { cdp, evaluate } from "../cdp-eval.js";
 import { browserCdp } from "../browser-runtime.js";
 import { state } from "../state.js";
+import { noMatchMessage } from "../element-resolver.js";
+import { describeSelector } from "../locator-query.js";
 import { elementCenter } from "./observe.js";
 import { resolveAndCall } from "./element-ops.js";
 import { waitForSelector } from "./waits.js";
@@ -598,14 +600,58 @@ function isInputDispatchTimeout(error: unknown) {
   return /CDP request timed out: Input\.dispatchMouseEvent/.test(message);
 }
 
+/** waitForSelector returns false on timeout; a pointer action must fail loud instead. */
+async function waitForVisibleTarget(selector: string, timeout?: number) {
+  const ms = timeout ?? Math.min(state.defaultTimeout, state.implicitTimeout);
+  if (!(await waitForSelector(selector, { timeout: ms, state: "visible" }))) {
+    throw new Error(
+      noMatchMessage(selector, ms, "waiting for it to be visible"),
+    );
+  }
+}
+
+/**
+ * Wait for a point the browser will actually accept.
+ *
+ * `elementCenter` is retryable when the element has no usable box yet (still
+ * laying out, collapsed, animating in), so the pointer path gives it the same
+ * implicit budget every other wait uses instead of failing on the first try —
+ * and when the budget runs out, the message says what a zero-sized element is.
+ */
+async function centerWhenClickable(
+  selector: string,
+  timeout?: number,
+): Promise<Point> {
+  const budget =
+    timeout ?? Math.min(state.defaultTimeout, state.implicitTimeout);
+  const deadline = state.now() + budget;
+  for (;;) {
+    try {
+      return await elementCenter(selector);
+    } catch (error: any) {
+      const noBox = /has no box model/.test(error?.message || "");
+      if (!noBox) throw error;
+      if (state.now() >= deadline) {
+        throw new Error(
+          `${describeSelector(selector)} has no size after waiting ${budget}ms (a 0x0 box), so there is no point to aim at. ` +
+            `Zero-sized elements are usually decorative or collapsed wrappers — pick a match that has size ` +
+            `(check locator.isVisible(), or step to .nth(1) / .filter({ hasText })), or target the element that carries the text.`,
+        );
+      }
+      await state.sleep(100);
+      await scrollIntoViewIfNeeded(selector).catch(() => {});
+    }
+  }
+}
+
 async function resolveMouseTarget(
   target: MouseTarget,
   timeout = undefined,
 ): Promise<Point> {
   if (typeof target === "string") {
-    await waitForSelector(target, { timeout, state: "visible" });
+    await waitForVisibleTarget(target, timeout);
     await scrollIntoViewIfNeeded(target);
-    return elementCenter(target);
+    return centerWhenClickable(target, timeout);
   }
   if (Array.isArray(target)) {
     return pointFrom(target);
@@ -617,11 +663,11 @@ async function resolveMouseTarget(
       target.selector
     ) {
       if (target.x === undefined && target.y === undefined) {
-        await waitForSelector(target.selector, { timeout, state: "visible" });
+        await waitForVisibleTarget(target.selector, timeout);
         await scrollIntoViewIfNeeded(target.selector);
         return elementCenter(target.selector);
       }
-      await waitForSelector(target.selector, { timeout, state: "visible" });
+      await waitForVisibleTarget(target.selector, timeout);
       await scrollIntoViewIfNeeded(target.selector);
       const [topLeft, center] = await Promise.all([
         elementTopLeft(target.selector),

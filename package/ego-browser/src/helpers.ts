@@ -3,7 +3,10 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { setOverrides, state } from "./state.js";
+import { parseRef } from "./ref-map.js";
+import { assertKnownRole } from "./locator-query.js";
 import { assertNoEgoError, isEgoUserControlError } from "./ego-errors.js";
+import { clearPreferredTarget, invalidateSession } from "./browser-runtime.js";
 import { help as helpRuntime, formatHelp } from "./help-runtime.js";
 import { cdp, decodeUnserializableJsValue, evaluate } from "./cdp-eval.js";
 import * as pointer from "./driver/pointer.js";
@@ -195,7 +198,9 @@ export async function useOrCreateTaskSpace(nameOrId) {
   const existing = findMatchingTaskSpace(spaces, nameOrId);
   if (!existing) {
     if (typeof nameOrId === "number") {
-      throw new Error(`task space not found: ${nameOrId}`);
+      throw new Error(
+        `task space not found: ${JSON.stringify(nameOrId)}. Task spaces are per-name; list them with taskSpaces.list(), or create/select one with taskSpaces.useOrCreate(name). An empty agent space is pruned after a while, so an id kept from an earlier run may be gone.`,
+      );
     }
     return newTaskSpace(nameOrId);
   }
@@ -247,6 +252,10 @@ async function selectTaskSpace(ego, space, op: string) {
     throw new Error(`${op} requires ego.useTaskSpace`);
   }
   assertNoEgoError(await ego.useTaskSpace(taskSpaceNumericId(space, op)), op);
+  // A cached session from another space must not outlive the switch (the CLI
+  // path has no installEgoSdk wrapper doing this).
+  invalidateSession();
+  clearPreferredTarget();
   return space;
 }
 
@@ -291,7 +300,9 @@ export async function completeTaskSpace(
   const spaces = await listTaskSpaces();
   const match = findMatchingTaskSpace(spaces, nameOrId);
   if (!match) {
-    throw new Error(`task space not found: ${nameOrId}`);
+    throw new Error(
+      `task space not found: ${JSON.stringify(nameOrId)}. Task spaces are per-name; list them with taskSpaces.list(), or create/select one with taskSpaces.useOrCreate(name). An empty agent space is pruned after a while, so an id kept from an earlier run may be gone.`,
+    );
   }
   if (options.keep) {
     if (match.ownership === "user") {
@@ -440,7 +451,10 @@ function taskSpaceNumericId(space, op: string) {
 async function findTaskSpace(nameOrId) {
   const spaces = await listTaskSpaces();
   const match = findMatchingTaskSpace(spaces, nameOrId);
-  if (!match) throw new Error(`task space not found: ${nameOrId}`);
+  if (!match)
+    throw new Error(
+      `task space not found: ${JSON.stringify(nameOrId)}. Task spaces are per-name; list them with taskSpaces.list(), or create/select one with taskSpaces.useOrCreate(name). An empty agent space is pruned after a while, so an id kept from an earlier run may be gone.`,
+    );
   return match;
 }
 
@@ -521,7 +535,7 @@ function createLocator(selector) {
   return {
     selector,
     first: () => createLocator(nthSelector(selector, 0)),
-    last: () => createLocator(`internal:last;${selector}`),
+    last: () => createLocator(nthSelector(selector, "last")),
     nth: (index) => {
       const value = Number(index);
       if (!Number.isInteger(value) || value < 0) {
@@ -580,6 +594,7 @@ function createLocator(selector) {
     blur: () => locator.blur(selector),
     textContent: () => locator.textContent(selector),
     innerText: () => locator.innerText(selector),
+    snapshot: (options: any = {}) => observe.snapshotLocator(selector, options),
     innerHTML: () => locator.innerHTML(selector),
     inputValue: () => locator.inputValue(selector),
     isChecked: () => locator.isChecked(selector),
@@ -610,8 +625,19 @@ function createLocator(selector) {
   };
 }
 
-function nthSelector(selector, index) {
-  return `internal:nth=${index};${selector}`;
+function nthSelector(selector, index: number | "last") {
+  // A `@N` ref already addresses exactly one element. Wrapping it in the nth
+  // form made the resolver fall through to raw CSS ("Failed to execute
+  // querySelectorAll"), so `.first()` broke a ref that worked on its own.
+  if (parseRef(selector)) {
+    if (index === 0 || index === "last") return selector;
+    throw new Error(
+      `${selector} addresses a single element, so .nth(${index}) has nothing to select. Use the ref itself, or a locator that can match several elements.`,
+    );
+  }
+  return index === "last"
+    ? `internal:last;${selector}`
+    : `internal:nth=${index};${selector}`;
 }
 
 function internalSelector(kind, data) {
@@ -619,6 +645,19 @@ function internalSelector(kind, data) {
 }
 
 function scopedSelector(base, child) {
+  // A `@N` ref is a captured DOM node id, not something page JS can look up, so
+  // it cannot serve as the root of a child query.
+  if (String(base).trim().startsWith("@") && !parseRef(base)) {
+    throw new Error(
+      `${base} is not a valid ref: a ref is "@" plus the number a snapshot row prints, such as "@1522". Run page.snapshot() and copy one from a row.`,
+    );
+  }
+  if (parseRef(base)) {
+    throw new Error(
+      `${base} cannot be used as the parent of a nested locator: a ref addresses one captured node, not a scope. ` +
+        `Read its subtree with page.locator("${base}").snapshot(), or scope from a semantic or CSS locator such as page.getByRole("region", { name }).getByRole("link").`,
+    );
+  }
   return internalSelector("scope", { base, child });
 }
 
@@ -639,6 +678,7 @@ function textSelector(prefix, text, options: any = {}) {
 }
 
 function roleSelector(role, options: any = {}) {
+  assertKnownRole(String(role));
   const name =
     options && Object.prototype.hasOwnProperty.call(options, "name")
       ? `[name=${JSON.stringify(roleNameMatcher(options.name))}]`
@@ -693,6 +733,8 @@ function createPageFacade() {
       state.defaultTimeout = value;
     },
     goto: nav.goto,
+    goBack: nav.goBack,
+    goForward: nav.goForward,
     reload: async (options: any = {}) => {
       await cdp("Page.reload", { ignoreCache: Boolean(options.ignoreCache) });
       if (options.waitUntil === "commit") {
@@ -703,6 +745,11 @@ function createPageFacade() {
       });
     },
     info: nav.pageInfo,
+    setViewportSize: nav.setViewportSize,
+    viewportSize: async () => {
+      const info: any = await nav.pageInfo();
+      return { width: info.w, height: info.h };
+    },
     url: async () => (await nav.pageInfo()).url,
     title: async () => (await nav.pageInfo()).title,
     locator: createLocator,
@@ -807,13 +854,13 @@ function createSiteFacade() {
 }
 
 const FACADE_HELP: Record<string, string> = {
-  page: 'page: Playwright-style page facade. page.url() asynchronously returns the current URL; always call await page.url() before using the string. Use page.goto(url), page.locator(selector), page.getByText(text), page.getByLabel(text), page.getByPlaceholder(text), page.getByTestId(testId), page.setDefaultTimeout(ms), page.waitForEvent("download"), page.waitForLoadState(state, options), page.waitForURL(url, options), page.waitForRequest(urlOrPredicate, options), page.waitForResponse(urlOrPredicate, options), page.evaluate(expression), page.screenshot(options), page.screencast.start({ path, size, quality }), page.screencast.stop(), page.keyboard.press(key), page.keyboard.type(text), and page.mouse.click(x, y). waitForURL predicates receive URL objects and waitUntil defaults to load.',
+  page: 'page: Playwright-style page facade. page.url() asynchronously returns the current URL; always call await page.url() before using the string. Read the page with page.snapshot({ maxResultLength, includeStableLocator, includeActionMarks }) (capped at 20000 chars by default — a full article measured 310121 chars; pass 0 for the whole page, and note @N refs always cover the whole page; includeStableLocator:true adds loc=... to every row, not only the ambiguous ones; an unknown option is an error, not a no-op), page.locator(selector).snapshot() for one region instead of the whole page (page.snapshot() and locator.snapshot() return a string; page.snapshotRaw() returns { content, refs }), page.info() (url, title, viewport, scroll), page.viewportSize(), page.setViewportSize({ width, height }) (the tab starts at 1280x900 headless; a smaller viewport collapses responsive controls out of the AX tree), page.title() and page.screenshot(options). Navigate with page.goto(url), page.reload(options), page.goBack(), page.goForward(). Find elements with page.locator(selector), page.getByRole(role, options), page.getByText(text), page.getByLabel(text), page.getByPlaceholder(text), page.getByAltText(text), page.getByTitle(text), page.getByTestId(testId). Wait with page.waitForLoadState(state, options), page.waitForURL(url, options), page.waitForSelector(selector, options), page.waitForFunction(fn, options), page.waitForEvent("download"), page.waitForRequest(urlOrPredicate, options), page.waitForResponse(urlOrPredicate, options), page.waitForTimeout(ms) (brief settle only), page.setDefaultTimeout(ms) (raises the timeout of every wait in this run; element reads only wait 3s implicitly, so wait explicitly for anything slower). Also page.evaluate(expression), page.screencast.start({ path, size, quality }), page.screencast.stop(), page.keyboard.press(key), page.keyboard.type(text), page.mouse.click(x, y). waitForURL predicates receive URL objects and waitUntil defaults to load.',
   locator:
-    "page.locator(selector): returns a strict, auto-waiting locator facade with locator(), getByRole(), getByText(), filter(), first(), nth(index), last(), click(), hover(), dragTo(target), scrollIntoViewIfNeeded(), fill(value), clear(), press(key), check(), selectOption(value), textContent(), innerText(), innerHTML(), isVisible(), isEnabled(), getAttribute(name), screenshot(), count(), evaluate(fn, arg), evaluateAll(fn, arg), and waitFor(options). Narrow multiple matches; use first()/nth() only for confirmed legitimate duplicates.",
+    "page.locator(selector): returns a strict, auto-waiting locator facade with locator(), getByRole(), getByText(), filter(), first(), nth(index), last(), click(), hover(), dragTo(target), scrollIntoViewIfNeeded(), fill(value), clear(), press(key), check(), selectOption(value), textContent(), innerText(), innerHTML(), snapshot(options) (accessibility snapshot of just that subtree), allInnerTexts(), allTextContents() (arrays over every match — the collection form of innerText/textContent), count() (counts what this same locator iterates: a CSS locator counts DOM elements, a role locator counts accessibility nodes, and the two can differ on the same page — count and iterate with the same locator), isVisible(), isEnabled(), getAttribute(name), screenshot(), count(), evaluate(fn, arg), evaluateAll(fn, arg), and waitFor(options). Narrow multiple matches; use first()/nth() only for confirmed legitimate duplicates.",
   browser:
-    "browser: tab facade. Use browser.listTabs(), browser.currentTab(), browser.switchTab(target), browser.openOrReuseTab(url, options), and browser.closeTab(target). openOrReuseTab reuses an agent tab from the same origin by default; use match:'exact' for a separate URL. Treat targetId as short-lived: obtain and validate it in the current script; switchTab/closeTab refresh the tab list before acting.",
+    "browser: tab facade. Use browser.listTabs(), browser.currentTab(), browser.switchTab(target), browser.openOrReuseTab(url, options), browser.closeTab(target), browser.ensureRealTab() (attach to a real page tab when the current one is an internal page), and browser.iframeTarget(urlSubstring) (returns a target id string or null). openOrReuseTab reuses an agent tab from the same origin by default; use match:'exact' for a separate URL. Treat targetId as short-lived: obtain and validate it in the current script; switchTab/closeTab refresh the tab list before acting.",
   taskSpaces:
-    "taskSpaces: task-space facade. Use taskSpaces.useOrCreate(nameOrId), taskSpaces.claim(nameOrId), taskSpaces.switch(nameOrId), taskSpaces.complete(nameOrId, options), taskSpaces.handOff(nameOrId), taskSpaces.takeOver(nameOrId), and taskSpaces.waitForAgentControl(nameOrId, options).",
+    "taskSpaces: task-space facade. Use taskSpaces.list(), taskSpaces.useOrCreate(nameOrId), taskSpaces.new(name), taskSpaces.claim(nameOrId), taskSpaces.switch(nameOrId), taskSpaces.complete(nameOrId, options), taskSpaces.handOff(nameOrId), taskSpaces.takeOver(nameOrId), and taskSpaces.waitForAgentControl(nameOrId, options). The selection lasts for this Bash invocation only: select again at the start of every script.",
   site: "site: learned site-skill facade. Use site.skills(url), site.skillsForUrl(url), site.runTool(siteId, toolName, args), site.runBrowserTool(siteId, toolName, args), and site.learnContext(url).",
   fetch:
     "fetch: network facade. Use fetch.server(url, options) for Node-side fetch and fetch.browser(url, options) for browser-origin fetch.",

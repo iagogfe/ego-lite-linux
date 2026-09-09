@@ -6,6 +6,7 @@ import {
 import { queryAllExpression as buildQueryAllExpression } from "../locator-query.js";
 import { parseRef } from "../ref-map.js";
 import { state } from "../state.js";
+import { invalidSelectorMessage, noMatchMessage } from "../element-resolver.js";
 import { releaseHandle, resolveAndCall, resolveHandle } from "./element-ops.js";
 
 /**
@@ -14,7 +15,7 @@ import { releaseHandle, resolveAndCall, resolveHandle } from "./element-ops.js";
  * @returns {Promise<string|null>}
  */
 export async function textContent(selector) {
-  return readElement(selector, "function(){return this.textContent;}");
+  return await readElement(selector, "function(){return this.textContent;}");
 }
 
 /**
@@ -23,7 +24,7 @@ export async function textContent(selector) {
  * @returns {Promise<string>}
  */
 export async function innerText(selector) {
-  return readElement(
+  return await readElement(
     selector,
     `function(){
       if (!(this instanceof HTMLElement)) throw new Error("innerText target must be an HTMLElement");
@@ -38,7 +39,7 @@ export async function innerText(selector) {
  * @returns {Promise<string>}
  */
 export async function innerHTML(selector) {
-  return readElement(
+  return await readElement(
     selector,
     `function(){
       if (!(this instanceof Element)) throw new Error("innerHTML target must be an Element");
@@ -53,7 +54,7 @@ export async function innerHTML(selector) {
  * @returns {Promise<string>}
  */
 export async function inputValue(selector) {
-  return readElement(
+  return await readElement(
     selector,
     `function(){
       const target = this instanceof HTMLLabelElement && this.control ? this.control : this;
@@ -64,7 +65,7 @@ export async function inputValue(selector) {
       ) {
         return target.value;
       }
-      throw new Error("inputValue target must be an input, textarea, or select");
+      throw new Error('inputValue needs an input, textarea or select; this element is a <' + this.tagName.toLowerCase() + '>. Use locator.innerText() or locator.textContent() to read text that is not in a form field');
     }`,
   );
 }
@@ -75,7 +76,7 @@ export async function inputValue(selector) {
  * @returns {Promise<boolean>}
  */
 export async function isChecked(selector) {
-  return readElement(
+  return await readElement(
     selector,
     `function(){
       const target = this instanceof HTMLLabelElement && this.control ? this.control : this;
@@ -93,17 +94,22 @@ export async function isChecked(selector) {
  * @returns {Promise<boolean>}
  */
 export async function isVisible(selector) {
-  return readOptionalElement(
+  return await readOptionalElement(
     selector,
+    // Playwright-style visibility, and the same bar click has to clear: CSS
+    // says shown AND the element occupies space. checkVisibility() alone
+    // called a 0x0 inline-block "visible" while click refused it.
     `function(){
       if (!(this instanceof Element)) return false;
       if (typeof this.checkVisibility === "function") {
-        return this.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+        if (!this.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;
+      } else {
+        const style = getComputedStyle(this);
+        if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return false;
       }
-      const style = getComputedStyle(this);
-      if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return false;
       const rect = this.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0;
+      if (rect.width > 0 && rect.height > 0) return true;
+      return Array.from(this.getClientRects()).some((r) => r.width > 0 && r.height > 0);
     }`,
     [],
     false,
@@ -125,7 +131,7 @@ export async function isHidden(selector) {
  * @returns {Promise<boolean>}
  */
 export async function isEnabled(selector) {
-  return readOptionalElement(
+  return await readOptionalElement(
     selector,
     `function(){
       const target = this instanceof HTMLLabelElement && this.control ? this.control : this;
@@ -155,7 +161,7 @@ export async function isDisabled(selector) {
  * @returns {Promise<boolean>}
  */
 export async function isEditable(selector) {
-  return readOptionalElement(
+  return await readOptionalElement(
     selector,
     `function(){
       const target = this instanceof HTMLLabelElement && this.control ? this.control : this;
@@ -178,7 +184,7 @@ export async function isEditable(selector) {
  * @returns {Promise<string|null>}
  */
 export async function getAttribute(selector, name) {
-  return readElement(
+  return await readElement(
     selector,
     "function(name){return this.getAttribute(String(name));}",
     [name],
@@ -200,7 +206,7 @@ export async function blur(selector) {
  * @returns {Promise<{x:number,y:number,width:number,height:number}|null>}
  */
 export async function boundingBox(selector) {
-  return readElement(
+  return await readElement(
     selector,
     `function(){
       if (!(this instanceof Element)) return null;
@@ -265,7 +271,7 @@ export async function allTextContents(selector) {
  */
 export async function evaluateLocator(selector, pageFunction, arg = undefined) {
   const functionSource = pageFunctionSource(pageFunction, "locator.evaluate");
-  return readElement(
+  return await readElement(
     selector,
     `function(functionSource, arg){
       const pageFunction = (0, eval)("(" + functionSource + ")");
@@ -301,17 +307,29 @@ export async function evaluateAll(selector, pageFunction, arg = undefined) {
   return evaluateQueryAll(selector, functionSource, arg);
 }
 
+// Reads carry an implicit wait for an element that is about to appear. Measured
+// on the real host, the full defaultTimeout made every miss cost 10s against a
+// 0.07s hit, and nothing in that budget distinguishes "not there yet" from "not
+// there": a page can insert an element at any time after load. So the implicit
+// wait gets a short budget and the failure names the explicit tools for a
+// longer one — page.waitForSelector / locator.waitFor / setDefaultTimeout.
+// ponytail: one constant, no per-call option, until a real case needs 3-10s
+// implicitly.
 async function readElement(selector, functionDeclaration, args = []) {
-  const deadline = state.now() + state.defaultTimeout;
+  const budget = Math.min(state.defaultTimeout, state.implicitTimeout);
+  const deadline = state.now() + budget;
   while (true) {
     try {
       return await readElementOnce(selector, functionDeclaration, args);
     } catch (error) {
-      if (
-        !(error instanceof ElementResolutionError) ||
-        error.kind !== "transient" ||
-        state.now() >= deadline
-      ) {
+      if (!(error instanceof ElementResolutionError)) throw error;
+      if (error.kind !== "transient") throw error;
+      if (state.now() >= deadline) {
+        // noMatchMessage owns the wording, including the wait recipe; a read
+        // only knows how long it waited.
+        error.message = /^No element matches /.test(error.message)
+          ? noMatchMessage(selector, budget)
+          : `${error.message} after waiting ${budget}ms`;
         throw error;
       }
       await state.sleep(Math.min(100, deadline - state.now()));
@@ -341,6 +359,26 @@ async function readOptionalElement(
 }
 
 async function readQueryAll(selector, body) {
+  if (parseRef(selector)) {
+    // A ref addresses exactly one element; the collection form is that element
+    // in a one-item list. Without this the ref reached querySelectorAll and was
+    // reported as malformed, even when it resolved fine everywhere else.
+    const handle = await resolveHandle(selector);
+    try {
+      const result = await cdp(
+        "Runtime.callFunctionOn",
+        {
+          objectId: handle.objectId,
+          functionDeclaration: `function(){const elements=[this];${body}}`,
+          returnByValue: true,
+        },
+        handle.sessionId,
+      );
+      return runtimeValue(result, body);
+    } finally {
+      await releaseHandle(handle.objectId, handle.sessionId);
+    }
+  }
   const backendNodeIds = await queryRoleBackendNodeIds(selector);
   if (backendNodeIds !== null) {
     return evaluateRoleBackendNodes(
@@ -359,6 +397,20 @@ async function readQueryAll(selector, body) {
     returnByValue: true,
     awaitPromise: false,
   });
+  if (result.exceptionDetails) {
+    // A collection read of a malformed selector used to surface the browser's
+    // raw SyntaxError plus the generated expression.
+    throw new Error(
+      invalidSelectorMessage(
+        selector,
+        String(
+          result.exceptionDetails?.exception?.description ||
+            result.exceptionDetails?.text ||
+            "",
+        ).split("\n")[0],
+      ),
+    );
+  }
   return runtimeValue(result, expression);
 }
 

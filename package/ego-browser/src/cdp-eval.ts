@@ -88,6 +88,18 @@ async function runtimeEvaluate(
   }
 }
 
+/**
+ * Text for the expression in an error. The agent's own `page.evaluate` code is
+ * worth quoting back; the helper sources ego-browser injects are not — a
+ * `setChecked` failure used to print the whole generated function plus an
+ * in-page stack.
+ */
+function expressionLabel(expression: unknown) {
+  const text = String(expression ?? "");
+  const helper = /^function\s*\(/.test(text.trim());
+  return helper ? null : jsSnippet(text);
+}
+
 export function runtimeValue(response, expression) {
   const result = response.result || {};
   const details = response.exceptionDetails;
@@ -97,8 +109,16 @@ export function runtimeValue(response, expression) {
       details?.lineNumber !== undefined && details?.columnNumber !== undefined
         ? ` at line ${details.lineNumber}, column ${details.columnNumber}`
         : "";
+    const label = expressionLabel(expression);
+    // Keep only the first line of the page-side description: the rest is the
+    // in-page stack of the injected helper, which is noise to the agent.
+    const message = String(desc)
+      .split("\n")[0]
+      .replace(/^Error:\s*/, "");
     throw new Error(
-      `JavaScript evaluation failed${loc}: ${desc}; expression: ${jsSnippet(expression)}`,
+      label
+        ? `JavaScript evaluation failed${loc}: ${message}; expression: ${label}`
+        : `${message}`,
     );
   }
   if (Object.hasOwn(result, "value")) {
