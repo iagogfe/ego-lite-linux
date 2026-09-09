@@ -672,7 +672,6 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
   const RECHECK_PROBE_MS = deps.recheckProbeMs ?? 40;
   const stuckTabs = new Map<string, string>();
 
-
   /**
    * Ask the tab directly whether it is alive. This is what makes the verdict
    * reversible: a tab that recovers proves it on the next attempt, from any
@@ -736,7 +735,9 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
     // A tab already known bad only has to prove it came back, and a live
     // renderer answers this in ~1ms — so the recheck can be much tighter than
     // the first verdict, which has to outlast a merely busy main thread.
-    const budget = stuckTabs.has(targetId) ? RECHECK_PROBE_MS : PROBE_TIMEOUT_MS;
+    const budget = stuckTabs.has(targetId)
+      ? RECHECK_PROBE_MS
+      : PROBE_TIMEOUT_MS;
     if (await tabAnswers(targetId, budget)) {
       lastAlive.set(targetId, Date.now());
       missedProbes.delete(targetId);
@@ -749,7 +750,8 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
     // both, a busy one answers the second.
     const missed = (missedProbes.get(targetId) ?? 0) + 1;
     missedProbes.set(targetId, missed);
-    if (missed < PROBES_BEFORE_VERDICT && !stuckTabs.has(targetId)) return false;
+    if (missed < PROBES_BEFORE_VERDICT && !stuckTabs.has(targetId))
+      return false;
     markTabStuck(targetId, method);
     return false;
   }
@@ -783,7 +785,9 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
     why = "answered",
   ): void {
     if (targetId && stuckTabs.delete(targetId)) {
-      deps.log?.(`tab no longer marked unresponsive (${why}): tab=${targetId.slice(0, 8)}`);
+      deps.log?.(
+        `tab no longer marked unresponsive (${why}): tab=${targetId.slice(0, 8)}`,
+      );
     }
   }
 
@@ -952,8 +956,7 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
     ) {
       throw makeEgoError(
         "EGO_BROWSER_UNAVAILABLE",
-        stuckTabs.get(snapshotTarget) ??
-          stuckTabMessage(snapshotTarget),
+        stuckTabs.get(snapshotTarget) ?? stuckTabMessage(snapshotTarget),
       );
     }
     // Activate and read in one turn: another client stealing focus midway is

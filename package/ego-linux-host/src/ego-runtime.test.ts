@@ -674,14 +674,21 @@ test("an unresponsive tab is diagnosed once and every path gets that answer", as
     .map((ev) => JSON.parse(ev.params.payload))
     .find((m) => m.id === 2 && m.error);
   assert.ok(second, "a later command was not short-circuited");
-  assert.equal(second.error.message, failure.error.message, "one cause, one message");
+  assert.equal(
+    second.error.message,
+    failure.error.message,
+    "one cause, one message",
+  );
 
   await assert.rejects(
     () => runtime.handle("snapshot", {}),
     (err: any) => /renderer is not responding/.test(err.message),
     "snapshot must give the same diagnosis, not a generic timeout",
   );
-  assert.ok(Date.now() - started < 400, "the client waited instead of learning");
+  assert.ok(
+    Date.now() - started < 400,
+    "the client waited instead of learning",
+  );
 });
 
 test("the verdict lifts by itself once the tab answers again", async () => {
@@ -690,7 +697,10 @@ test("the verdict lifts by itself once the tab answers again", async () => {
   let wedged = true;
   fakeCdp.send = async (method: string) => {
     // While wedged the renderer answers nothing, probe included.
-    if (wedged && (method.startsWith("Accessibility.") || method === "Page.getFrameTree")) {
+    if (
+      wedged &&
+      (method.startsWith("Accessibility.") || method === "Page.getFrameTree")
+    ) {
       await delay(10_000);
     }
     if (method === "Accessibility.getFullAXTree") return { nodes: [] };
