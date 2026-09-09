@@ -99,22 +99,6 @@ test("assignTarget moves tab between spaces", () => {
   );
 });
 
-test("targetsForReusableTabs excludes user and handed-off spaces", () => {
-  const sm = new SpaceManager();
-  const agent = sm.createAgentSpace("agent");
-  const handedOff = sm.createAgentSpace("handed-off");
-
-  sm.assignTarget("agent-tab", agent.id);
-  sm.assignTarget("handed-off-tab", handedOff.id);
-  sm.use(handedOff.id);
-  sm.handOff();
-
-  sm.use(1);
-  sm.assignTarget("user-tab");
-
-  assert.deepEqual(sm.targetsForReusableTabs(), ["agent-tab"]);
-});
-
 test("reconcileTargets removes memberships for closed Chrome targets", () => {
   const sm = new SpaceManager();
   const agent = sm.createAgentSpace("stale");
@@ -126,6 +110,117 @@ test("reconcileTargets removes memberships for closed Chrome targets", () => {
   assert.deepEqual(sm.list().find((s) => s.id === agent.id)?.targetIds, [
     "live",
   ]);
+});
+
+test("selection is per client and does not leak between them", () => {
+  const sm = new SpaceManager();
+  const a = sm.createAgentSpace("client-a");
+  const b = sm.createAgentSpace("client-b");
+
+  sm.runForClient("A", () => sm.use(a.id));
+  sm.runForClient("B", () => sm.use(b.id));
+  // A selected first, B second: with one shared cursor A's tab lands in B.
+  sm.runForClient("A", () => sm.assignTarget("ta"));
+  sm.runForClient("B", () => sm.assignTarget("tb"));
+
+  assert.equal(sm.spaceIdForTarget("ta"), a.id);
+  assert.equal(sm.spaceIdForTarget("tb"), b.id);
+  assert.equal(
+    sm.runForClient("A", () => sm.selected()?.id),
+    a.id,
+  );
+  assert.deepEqual(
+    sm.runForClient("A", () => sm.targetsForSelected()),
+    ["ta"],
+  );
+  // A client that never selected sees no space, it does not inherit one.
+  assert.equal(
+    sm.runForClient("C", () => sm.selected()),
+    null,
+  );
+});
+
+test("releaseClient drops a disconnected client's selection", () => {
+  const sm = new SpaceManager();
+  const a = sm.createAgentSpace("gone");
+  sm.runForClient("A", () => sm.use(a.id));
+  sm.releaseClient("A");
+  assert.equal(
+    sm.runForClient("A", () => sm.selected()),
+    null,
+  );
+});
+
+test("pruneEmptyAgentSpaces drops tabless agent spaces and keeps the rest", () => {
+  const sm = new SpaceManager();
+  const empty = sm.createAgentSpace("empty");
+  const busy = sm.createAgentSpace("busy");
+  sm.assignTarget("t1", busy.id);
+  const handedOff = sm.createAgentSpace("handed-off");
+  sm.use(handedOff.id);
+  sm.handOff();
+  // A space a live client just created and has not filled yet must survive.
+  const justCreated = sm.createAgentSpace("just-created");
+  sm.runForClient("live", () => sm.use(justCreated.id));
+
+  assert.equal(sm.pruneEmptyAgentSpaces(), 1);
+
+  const ids = sm.list().map((s) => s.id);
+  assert.equal(ids.includes(empty.id), false, "empty agent space is dropped");
+  assert.ok(ids.includes(busy.id), "space with a tab survives");
+  assert.ok(ids.includes(1), "user space survives");
+  assert.ok(
+    ids.includes(handedOff.id),
+    "a space under user control is not agent-owned garbage",
+  );
+  assert.ok(
+    ids.includes(justCreated.id),
+    "a space a live client selected is not garbage yet",
+  );
+});
+
+test("collectStaleAgentSpaces closes only abandoned agent tabs", () => {
+  const sm = new SpaceManager();
+  const HOUR = 60 * 60 * 1000;
+  const now = Date.now();
+
+  const stale = sm.createAgentSpace("stale-agent");
+  sm.assignTarget("stale-tab", stale.id);
+  const fresh = sm.createAgentSpace("fresh-agent");
+  sm.assignTarget("fresh-tab", fresh.id);
+  const delegated = sm.createAgentSpace("delegated");
+  sm.use(delegated.id);
+  sm.assignTarget("delegated-tab");
+  sm.handOff();
+  const selected = sm.createAgentSpace("in-use");
+  sm.assignTarget("in-use-tab", selected.id);
+  // The person's own tab lives in the user space.
+  sm.assignTarget("user-tab", 1);
+
+  // Age everything except the fresh space, then hold one via a live client.
+  for (const space of [stale, delegated, selected]) {
+    (sm as any).spaces.find((s: any) => s.id === space.id).lastUsedAt =
+      now - 3 * HOUR;
+  }
+  (sm as any).spaces.find((s: any) => s.id === 1).lastUsedAt = now - 3 * HOUR;
+  sm.runForClient("live", () => sm.use(selected.id));
+  (sm as any).spaces.find((s: any) => s.id === selected.id).lastUsedAt =
+    now - 3 * HOUR;
+
+  const closed = sm.collectStaleAgentSpaces(2 * HOUR, now);
+
+  assert.deepEqual(closed, ["stale-tab"]);
+  const ids = sm.list().map((s) => s.id);
+  assert.equal(ids.includes(stale.id), false);
+  assert.ok(ids.includes(fresh.id), "recently used agent space survives");
+  assert.ok(ids.includes(delegated.id), "user was handed control; not garbage");
+  assert.ok(ids.includes(selected.id), "a live client has it selected");
+  assert.ok(ids.includes(1), "the user space is never collected");
+  assert.equal(
+    sm.spaceIdForTarget("user-tab"),
+    1,
+    "the person's own tab is never closed",
+  );
 });
 
 test("clearSelection leaves persisted spaces available without selecting one", () => {
@@ -210,6 +305,8 @@ test("persist save/load round-trips spaces and selection", async () => {
     const a = sm.createAgentSpace("persisted");
     sm.use(a.id);
     sm.assignTarget("pt1");
+    sm.assignTarget("pt2");
+    sm.activateTarget("pt1");
     sm.handOff();
     await sm.save();
 
@@ -222,7 +319,8 @@ test("persist save/load round-trips spaces and selection", async () => {
     await sm2.load();
     assert.equal(sm2.selected()?.id, a.id);
     assert.equal(sm2.selected()?.ownership, "agentDelegatedToUser");
-    assert.deepEqual(sm2.targetsForSelected(), ["pt1"]);
+    assert.deepEqual(sm2.targetsForSelected(), ["pt1", "pt2"]);
+    assert.equal(sm2.activeTargetForSelected(), "pt1");
     assert.ok(sm2.list().find((s) => s.id === 1));
   } finally {
     await rm(dir, { recursive: true, force: true });

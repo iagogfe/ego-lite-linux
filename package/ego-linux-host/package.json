@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "bin": {
     "ego-browser": "./bin/ego-browser.mjs",
     "ego-linux-hostd": "./bin/ego-linux-hostd.mjs"
@@ -17,7 +19,11 @@
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^22.15.29",
+    "@types/ws": "^8.18.1",
     "esbuild": "^0.28.1",
     "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "ws": "^8.21.3"
   }
 }

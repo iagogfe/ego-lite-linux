@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { setTimeout as delay } from "node:timers/promises";
 import type { CdpBridge, CdpPageTarget } from "./cdp-bridge.js";
 import { actionLabel, createEgoRuntime } from "./ego-runtime.js";
 import { SpaceManager } from "./space-manager.js";
@@ -68,6 +69,18 @@ function makeFakeCdp(initial: CdpPageTarget[] = []): FakeCdp {
     },
   };
   return fake;
+}
+
+
+/** True while any of the promises is still unsettled. */
+async function pending(promises: Promise<unknown>[]): Promise<boolean> {
+  const marker = Symbol("pending");
+  const states = await Promise.all(
+    promises.map((p) =>
+      Promise.race([p.catch(() => undefined), Promise.resolve(marker)]),
+    ),
+  );
+  return states.includes(marker);
 }
 
 function setup(opts?: { targets?: CdpPageTarget[] }) {
@@ -174,12 +187,12 @@ test("listTabs returns empty for agent space with no tabs (not user tabs)", asyn
   assert.deepEqual(result.tabs, []);
 });
 
-test("findReusableTab moves a matching tab from another agent space", async () => {
-  const { sm, fakeCdp, runtime } = setup({
+test("findReusableTab never takes a tab from another agent space", async () => {
+  const { sm, runtime } = setup({
     targets: [
       {
-        targetId: "old-agent-tab",
-        title: "Old Example",
+        targetId: "other-agent-tab",
+        title: "Other agent",
         url: "https://example.com/previous",
         type: "page",
       },
@@ -192,8 +205,8 @@ test("findReusableTab moves a matching tab from another agent space", async () =
     ],
   });
   sm.adoptOrphanTargets(["user-tab"]);
-  const oldSpace = sm.createAgentSpace("old-job");
-  sm.assignTarget("old-agent-tab", oldSpace.id);
+  const otherSpace = sm.createAgentSpace("other-job");
+  sm.assignTarget("other-agent-tab", otherSpace.id);
   const currentSpace = sm.createAgentSpace("current-job");
   sm.use(currentSpace.id);
 
@@ -202,20 +215,37 @@ test("findReusableTab moves a matching tab from another agent space", async () =
     match: "origin",
   });
 
-  assert.deepEqual(result, {
-    targetId: "old-agent-tab",
-    title: "Old Example",
-    url: "https://example.com/previous",
-  });
-  assert.deepEqual(sm.targetsForSelected(), ["old-agent-tab"]);
+  assert.equal(result, null);
+  // The other space keeps its tab; this one gained nothing.
+  assert.deepEqual(sm.targetsForSelected(), []);
   assert.deepEqual(
-    sm.list().find((space) => space.id === oldSpace.id)?.targetIds,
-    [],
+    sm.list().find((space) => space.id === otherSpace.id)?.targetIds,
+    ["other-agent-tab"],
   );
-  assert.deepEqual(sm.list().find((space) => space.id === 1)?.targetIds, [
-    "user-tab",
-  ]);
-  void fakeCdp;
+});
+
+test("findReusableTab reuses a matching tab of the selected space", async () => {
+  const { sm, runtime } = setup({
+    targets: [
+      {
+        targetId: "own-tab",
+        title: "Mine",
+        url: "https://example.com/previous",
+        type: "page",
+      },
+    ],
+  });
+  const current = sm.createAgentSpace("current-job");
+  sm.use(current.id);
+  sm.assignTarget("own-tab");
+
+  assert.deepEqual(
+    await runtime.handle("findReusableTab", {
+      url: "https://example.com/current",
+      match: "origin",
+    }),
+    { targetId: "own-tab", title: "Mine", url: "https://example.com/previous" },
+  );
 });
 
 test("findReusableTab ignores handed-off tabs", async () => {
@@ -262,12 +292,446 @@ test("createTab creates target and assigns to selected space", async () => {
   assert.equal(listed.tabs[0].url, "https://example.com");
 });
 
+test("createTab gives the new tab the configured viewport", async () => {
+  const sm = new SpaceManager();
+  const fakeCdp = makeFakeCdp();
+  const sent: any[] = [];
+  const origSend = fakeCdp.send.bind(fakeCdp);
+  fakeCdp.send = async (method: string, params?: object, sessionId?: string) => {
+    sent.push({ method, params, sessionId });
+    return origSend(method, params, sessionId);
+  };
+  const runtime = createEgoRuntime({
+    spaceManager: sm,
+    getCdp: () => fakeCdp,
+    ensureSession: async () => "sess-1",
+    viewport: { width: 1280, height: 900 },
+  });
+  const space = sm.createAgentSpace("vp");
+  sm.use(space.id);
+
+  const created = await runtime.handle("createTab", { url: "https://x.test" });
+
+  const metrics = sent.find(
+    (c) => c.method === "Emulation.setDeviceMetricsOverride",
+  );
+  assert.ok(metrics, "a new agent tab must get the launch viewport");
+  assert.equal(metrics.params.width, 1280);
+  assert.equal(metrics.params.height, 900);
+  assert.equal(metrics.sessionId, `session-${created.targetId}`);
+});
+
+test("createTab leaves the viewport alone when none is configured", async () => {
+  const { runtime, sm, fakeCdp } = setup();
+  const sent: string[] = [];
+  const origSend = fakeCdp.send.bind(fakeCdp);
+  fakeCdp.send = async (method: string, params?: object, sessionId?: string) => {
+    sent.push(method);
+    return origSend(method, params, sessionId);
+  };
+  const space = sm.createAgentSpace("headed");
+  sm.use(space.id);
+
+  await runtime.handle("createTab", { url: "https://x.test" });
+
+  assert.equal(sent.includes("Emulation.setDeviceMetricsOverride"), false);
+});
+
 test("createTab fails without selected space", async () => {
   const { runtime } = setup();
   await assert.rejects(
     () => runtime.handle("createTab", { url: "https://x" }),
     (err: any) => err.error_code === "EGO_TASK_SPACE_NOT_SELECTED",
   );
+});
+
+test("creating a task space closes tabs abandoned by earlier agent sessions", async () => {
+  const sm = new SpaceManager();
+  const fakeCdp = makeFakeCdp();
+  const runtime = createEgoRuntime({
+    spaceManager: sm,
+    getCdp: () => fakeCdp,
+    ensureSession: async () => "sess-1",
+    staleSpaceTtlMs: 1,
+  });
+
+  const old = sm.createAgentSpace("yesterday");
+  sm.assignTarget("old-agent-tab", old.id);
+  sm.assignTarget("user-tab", 1);
+  (sm as any).spaces.find((s: any) => s.id === old.id).lastUsedAt = 0;
+  (sm as any).spaces.find((s: any) => s.id === 1).lastUsedAt = 0;
+
+  await runtime.handle("createTaskSpace", { name: "today" });
+
+  assert.deepEqual(fakeCdp.closedTargets, ["old-agent-tab"]);
+  assert.equal(sm.list().some((s) => s.id === old.id), false);
+  assert.equal(sm.spaceIdForTarget("user-tab"), 1);
+});
+
+test("snapshot activates its own tab before reading the AX tree", async () => {
+  const { sm, runtime, fakeCdp } = setup();
+  const calls: string[] = [];
+  const origSend = fakeCdp.send.bind(fakeCdp);
+  fakeCdp.send = async (method: string, params?: any, sessionId?: string) => {
+    calls.push(method);
+    return origSend(method, params, sessionId);
+  };
+  const space = sm.createAgentSpace("reader");
+  sm.use(space.id);
+  const tab = await runtime.handle("createTab", { url: "https://x.test" });
+  // Someone else's tab holds focus, the normal case for a task space.
+  await runtime.handle("sendCDPMessage", {
+    payload: JSON.stringify({
+      method: "Target.activateTarget",
+      params: { targetId: "other-tab" },
+    }),
+  });
+  calls.length = 0;
+
+  await runtime.handle("snapshot", {});
+
+  const activated = calls.indexOf("Target.activateTarget");
+  const read = calls.findIndex((m) => m.startsWith("Accessibility."));
+  assert.ok(activated >= 0, "the tab must be activated");
+  assert.ok(
+    activated < read,
+    // Chrome only answers accessibility for the focused tab.
+    `activation must precede the AX read, got ${calls.join(",")}`,
+  );
+  assert.equal(sm.activeTargetForSelected(), tab.targetId);
+});
+
+test("concurrent snapshots take turns instead of stealing focus", async () => {
+  const sm = new SpaceManager();
+  const fakeCdp = makeFakeCdp();
+  const order: string[] = [];
+  let inFlight = 0;
+  let overlapped = false;
+  fakeCdp.send = async (method: string) => {
+    if (method === "Accessibility.queryAXTree" || method === "Accessibility.getFullAXTree") {
+      if (++inFlight > 1) overlapped = true;
+      order.push("start");
+      await delay(20);
+      inFlight--;
+      order.push("end");
+      return { nodes: [] };
+    }
+    return {};
+  };
+  const runtime = createEgoRuntime({
+    spaceManager: sm,
+    getCdp: () => fakeCdp,
+    ensureSession: async () => "sess-1",
+  });
+  const a = sm.createAgentSpace("a");
+  sm.assignTarget("ta", a.id);
+  sm.use(a.id);
+
+  // Three different connections: the lease is per client, so one client's own
+  // reads may overlap, but two clients must never read at the same time.
+  await Promise.all(
+    ["c1", "c2", "c3"].map((clientId) =>
+      sm.runForClient(clientId, () => {
+        sm.use(a.id);
+        return runtime.handle("snapshot", {});
+      }),
+    ),
+  );
+
+  assert.equal(overlapped, false, "AX reads overlapped; focus would be stolen");
+  assert.deepEqual(order, ["start", "end", "start", "end", "start", "end"]);
+});
+
+test("a harness AX read holds the focus turn until its reply arrives", async () => {
+  const sm = new SpaceManager();
+  const fakeCdp = makeFakeCdp();
+  let axReading = false;
+  let snapshotStolenFocus = false;
+  fakeCdp.send = async (method: string) => {
+    if (method.startsWith("Accessibility.")) {
+      // A snapshot must not read while the harness's own read is in flight.
+      if (axReading) snapshotStolenFocus = true;
+      return { nodes: [] };
+    }
+    return {};
+  };
+  const runtime = createEgoRuntime({
+    spaceManager: sm,
+    getCdp: () => fakeCdp,
+    ensureSession: async () => "sess-1",
+  });
+  runtime.attachCdpForwarding();
+  const space = sm.createAgentSpace("role-reader");
+  sm.assignTarget("t-role", space.id);
+
+  // Client 1 fires a raw AX read through the harness path (fire and forget).
+  await sm.runForClient("c1", () => {
+    sm.use(space.id);
+    return runtime.handle("sendCDPMessage", {
+      payload: JSON.stringify({
+        id: 7,
+        method: "Accessibility.getFullAXTree",
+        params: {},
+      }),
+    });
+  });
+  axReading = true;
+
+  // Client 2's snapshot must queue behind it, not read immediately.
+  const snapshot = sm.runForClient("c2", () => {
+    sm.use(space.id);
+    return runtime.handle("snapshot", {});
+  });
+  await delay(50);
+  assert.equal(
+    snapshotStolenFocus,
+    false,
+    "snapshot read while the harness still held the focus turn",
+  );
+
+  // The reply releases the turn (plus the grace window).
+  axReading = false;
+  fakeCdp.deliverMessage({ id: 1_000_000_000, result: { nodes: [] } });
+  await snapshot;
+});
+
+test("a late harness reply does not hand the lease away mid-snapshot", async () => {
+  const sm = new SpaceManager();
+  const fakeCdp = makeFakeCdp();
+  let snapshotReading = false;
+  let stolenMidSnapshot = false;
+  const waiting: Array<() => void> = [];
+  fakeCdp.send = async (method: string) => {
+    if (method === "Accessibility.getFullAXTree") {
+      snapshotReading = true;
+      await new Promise<void>((r) => waiting.push(r));
+      snapshotReading = false;
+      return { nodes: [] };
+    }
+    if (method === "Target.activateTarget" && snapshotReading) {
+      // Another client focusing a tab while this read is in flight kills it.
+      stolenMidSnapshot = true;
+    }
+    return {};
+  };
+  const runtime = createEgoRuntime({
+    spaceManager: sm,
+    getCdp: () => fakeCdp,
+    ensureSession: async () => "sess-1",
+  });
+  runtime.attachCdpForwarding();
+  // Two spaces with their own tabs: stealing focus means switching tab.
+  const space = sm.createAgentSpace("late-reply");
+  sm.assignTarget("t-late", space.id);
+  const otherSpace = sm.createAgentSpace("other");
+  sm.assignTarget("t-other", otherSpace.id);
+
+  // c1 fires a harness AX read, then starts a snapshot before the reply lands.
+  await sm.runForClient("c1", () => {
+    sm.use(space.id);
+    return runtime.handle("sendCDPMessage", {
+      payload: JSON.stringify({ id: 5, method: "Accessibility.getFullAXTree" }),
+    });
+  });
+  const snapshot = sm.runForClient("c1", () => {
+    sm.use(space.id);
+    return runtime.handle("snapshot", {});
+  });
+  await delay(20);
+  // c2 queues up, so the lease has somewhere to go.
+  const other = sm.runForClient("c2", () => {
+    sm.use(otherSpace.id);
+    return runtime.handle("snapshot", {});
+  });
+  await delay(10);
+
+  // The late reply to c1's harness read arrives while c1's snapshot is reading.
+  fakeCdp.deliverMessage({ id: 1_000_000_000, result: { nodes: [] } });
+  await delay(20);
+  const stolen = stolenMidSnapshot;
+
+  // Let both finish (each read waits on its own release) before asserting, so
+  // a failure reports the problem instead of hanging the runner.
+  for (let i = 0; i < 6 && (await pending([snapshot, other])); i++) {
+    waiting.splice(0).forEach((r) => r());
+    await delay(10);
+  }
+  await Promise.all([snapshot, other].map((p) => p.catch(() => undefined)));
+
+  assert.equal(stolen, false, "the lease moved while a snapshot was mid-read");
+});
+
+test("focusing a tab waits its turn instead of cutting a read short", async () => {
+  const sm = new SpaceManager();
+  const fakeCdp = makeFakeCdp();
+  let reading = false;
+  let cutShort = false;
+  const waiting: Array<() => void> = [];
+  fakeCdp.send = async (method: string) => {
+    if (method === "Accessibility.getFullAXTree") {
+      reading = true;
+      await new Promise<void>((r) => waiting.push(r));
+      reading = false;
+      return { nodes: [] };
+    }
+    return {};
+  };
+  fakeCdp.sendRaw = (payload: any) => {
+    if (payload?.method === "Target.activateTarget" && reading) cutShort = true;
+  };
+  const runtime = createEgoRuntime({
+    spaceManager: sm,
+    getCdp: () => fakeCdp,
+    ensureSession: async () => "sess-1",
+  });
+  const reader = sm.createAgentSpace("reader");
+  sm.assignTarget("t-read", reader.id);
+  const opener = sm.createAgentSpace("opener");
+  sm.assignTarget("t-open", opener.id);
+
+  const read = sm.runForClient("reader", () => {
+    sm.use(reader.id);
+    return runtime.handle("snapshot", {});
+  });
+  await delay(20);
+
+  // Another client opening/reusing a tab activates it — the harness does this
+  // on every openOrReuseTab, and it used to hang the read above for ~16s.
+  const activate = sm.runForClient("opener", () => {
+    sm.use(opener.id);
+    return runtime.handle("sendCDPMessage", {
+      payload: JSON.stringify({
+        method: "Target.activateTarget",
+        params: { targetId: "t-open" },
+      }),
+    });
+  });
+  await delay(30);
+  assert.equal(cutShort, false, "a tab was focused while a read was in flight");
+
+  waiting.splice(0).forEach((r) => r());
+  await read;
+  await activate;
+});
+
+test("a read whose tab stays stuck is failed instead of re-queued forever", async () => {
+  const sm = new SpaceManager();
+  const fakeCdp = makeFakeCdp();
+  const runtime = createEgoRuntime({
+    spaceManager: sm,
+    getCdp: () => fakeCdp,
+    ensureSession: async () => "sess-1",
+    focusMaxMs: 40,
+  });
+  const events: any[] = [];
+  runtime.onEvent((ev) => events.push(ev));
+  runtime.attachCdpForwarding();
+  const stuck = sm.createAgentSpace("stuck");
+  sm.assignTarget("t-stuck", stuck.id);
+  const other = sm.createAgentSpace("other");
+  sm.assignTarget("t-other", other.id);
+
+  // A tab that never answers: the reply for this id never arrives.
+  await sm.runForClient("stuck-client", () => {
+    sm.use(stuck.id);
+    return runtime.handle("sendCDPMessage", {
+      payload: JSON.stringify({ id: 9, method: "Accessibility.getFullAXTree" }),
+    });
+  });
+  // Someone waiting is what makes the deadline hand the turn over.
+  const waiter = sm.runForClient("waiter", () => {
+    sm.use(other.id);
+    return runtime.handle("snapshot", {});
+  });
+  await delay(250);
+
+  // Preempted twice, the client is answered with an error rather than left
+  // waiting out its own 30s CDP timeout while holding a turn every 40ms.
+  const failure = events.find((ev) => {
+    if (ev.event !== "cdp.message") return false;
+    const msg = JSON.parse(ev.params.payload);
+    return msg.id === 9 && msg.error;
+  });
+  assert.ok(failure, "the stuck read was never answered");
+  assert.match(failure.params.payload, /renderer looks stuck/);
+  await waiter;
+});
+
+test("a wedged read gives up the focus turn instead of holding the queue", async () => {
+  const sm = new SpaceManager();
+  const fakeCdp = makeFakeCdp();
+  const wedged = { resolve: () => {} };
+  fakeCdp.send = async (method: string) => {
+    if (method === "Accessibility.getFullAXTree") {
+      // Never answers, like a wedged renderer.
+      await new Promise<void>((r) => (wedged.resolve = r));
+      return { nodes: [] };
+    }
+    return {};
+  };
+  const runtime = createEgoRuntime({
+    spaceManager: sm,
+    getCdp: () => fakeCdp,
+    ensureSession: async () => "sess-1",
+    focusMaxMs: 100,
+  });
+  const space = sm.createAgentSpace("wedge");
+  sm.assignTarget("t-wedge", space.id);
+
+  const stuck = sm.runForClient("stuck", () => {
+    sm.use(space.id);
+    return runtime.handle("snapshot", {});
+  });
+  await delay(20);
+
+  // A healthy client's own AX read: it needs the same turn, so it is the one
+  // that would wait out the wedge without a cap.
+  fakeCdp.send = async (method: string) =>
+    method === "Accessibility.getFullAXTree" ? { nodes: [] } : {};
+  const t = Date.now();
+  const served = await Promise.race([
+    sm.runForClient("healthy", () => {
+      sm.use(space.id);
+      return runtime.handle("snapshot", {});
+    }),
+    delay(1000).then(() => "stuck" as const),
+  ]);
+  const waited = Date.now() - t;
+  assert.notEqual(served, "stuck", "healthy client waited out the wedge");
+  assert.ok(waited < 300, `healthy client waited ${waited}ms behind a wedge`);
+
+  wedged.resolve();
+  await stuck.catch(() => undefined);
+});
+
+test("listTaskSpaces reports tabs per space without selecting one", async () => {
+  const { sm, runtime } = setup();
+  const work = sm.createAgentSpace("work");
+  sm.use(work.id);
+  const created = await runtime.handle("createTab", {
+    url: "https://example.com/a",
+  });
+  // A user-owned space holds the person's own browsing.
+  sm.assignTarget("user-tab", 1);
+  sm.clearSelection();
+
+  const { taskSpaces } = await runtime.handle("listTaskSpaces", {});
+  const agentSpace = taskSpaces.find((s: any) => s.id === work.id);
+  assert.equal(agentSpace.tabCount, 1);
+  assert.deepEqual(agentSpace.tabs, [
+    {
+      targetId: created.targetId,
+      title: "",
+      url: "https://example.com/a",
+      active: true,
+    },
+  ]);
+
+  const userSpace = taskSpaces.find((s: any) => s.id === 1);
+  assert.equal(userSpace.tabCount, 0, "counts only tabs Chrome still has");
+  assert.equal("tabs" in userSpace, false, "user browsing urls stay private");
+  // Listing must not have picked a space for this client.
+  assert.equal(sm.selected(), null);
 });
 
 test("task space create / use / claim / handOff / takeOver", async () => {
@@ -372,19 +836,94 @@ test("sendCDPMessage page domain blocked under user control emits cdp.sendError"
   assert.equal(events[0].params.error_code, "EGO_TASK_SPACE_USER_IN_CONTROL");
 });
 
-test("sendCDPMessage allows Target.* under user control", async () => {
+test("sendCDPMessage allows only the read-only browser version under user control", async () => {
   const { sm, fakeCdp, runtime } = setup();
   sm.use(1);
 
   await runtime.handle("sendCDPMessage", {
     payload: JSON.stringify({
       id: 3,
-      method: "Target.getTargets",
+      method: "Browser.getVersion",
       params: {},
     }),
   });
   assert.equal(fakeCdp.rawSent.length, 1);
-  assert.equal((fakeCdp.rawSent[0] as any).method, "Target.getTargets");
+  assert.equal((fakeCdp.rawSent[0] as any).method, "Browser.getVersion");
+});
+
+test("sendCDPMessage blocks browser and target mutations without agent ownership", async () => {
+  const { sm, fakeCdp, runtime } = setup();
+  sm.use(1);
+
+  const events: any[] = [];
+  runtime.onEvent((ev) => events.push(ev));
+  for (const [id, method] of [
+    [4, "Target.getTargets"],
+    [5, "Target.activateTarget"],
+    [6, "Target.createTarget"],
+    [7, "Target.closeTarget"],
+    [8, "Browser.setDownloadBehavior"],
+    [9, "Browser.close"],
+  ] as const) {
+    await runtime.handle("sendCDPMessage", {
+      payload: JSON.stringify({ id, method, params: {} }),
+    });
+  }
+
+  assert.equal(fakeCdp.rawSent.length, 0);
+  assert.equal(events.length, 6);
+  assert.ok(
+    events.every(
+      (event) =>
+        event.event === "cdp.sendError" &&
+        event.params.error_code === "EGO_TASK_SPACE_USER_IN_CONTROL",
+    ),
+  );
+});
+
+test("tab operations reject user-owned and handed-off spaces", async () => {
+  for (const ownership of ["user", "agentDelegatedToUser"] as const) {
+    const { sm, fakeCdp, runtime } = setup({
+      targets: [
+        {
+          targetId: "owned-tab",
+          title: "Owned",
+          url: "https://owned.example",
+          type: "page",
+        },
+      ],
+    });
+    const space =
+      ownership === "user"
+        ? sm.list().find((candidate) => candidate.id === 1)!
+        : sm.createAgentSpace("handed-off");
+    sm.use(space.id);
+    sm.assignTarget("owned-tab", space.id);
+    if (ownership === "agentDelegatedToUser") sm.handOff();
+
+    for (const method of ["listTabs", "createTab", "closeTaskSpace"]) {
+      await assert.rejects(
+        () => runtime.handle(method, { url: "https://new.example" }),
+        (err: any) => err.error_code === "EGO_TASK_SPACE_USER_IN_CONTROL",
+        `${method} must honor ${ownership} ownership`,
+      );
+    }
+    assert.equal(fakeCdp.targets.length, 1);
+    assert.deepEqual(fakeCdp.closedTargets, []);
+    assert.ok(sm.list().some((candidate) => candidate.id === space.id));
+  }
+});
+
+test("closeSelected rejects a user-owned space before clearing its tabs", () => {
+  const sm = new SpaceManager();
+  sm.use(1);
+  sm.assignTarget("user-tab");
+
+  assert.throws(
+    () => sm.closeSelected(),
+    (err: any) => err.error_code === "EGO_TASK_SPACE_USER_IN_CONTROL",
+  );
+  assert.deepEqual(sm.targetsForSelected(), ["user-tab"]);
 });
 
 test("attachCdpForwarding pushes cdp.message events", async () => {
@@ -393,10 +932,36 @@ test("attachCdpForwarding pushes cdp.message events", async () => {
   runtime.onEvent((ev) => events.push(ev));
   runtime.attachCdpForwarding();
 
-  fakeCdp.deliverMessage({ id: 9, result: { value: 1 } });
+  fakeCdp.deliverMessage({ method: "Page.loadEventFired", params: {} });
   assert.equal(events.length, 1);
   assert.equal(events[0].event, "cdp.message");
-  assert.equal(JSON.parse(events[0].params.payload).result.value, 1);
+  assert.equal(JSON.parse(events[0].params.payload).method, "Page.loadEventFired");
+});
+
+test("harness CDP ids never collide with the daemon's own requests", async () => {
+  const { sm, fakeCdp, runtime } = setup();
+  sm.use(sm.createAgentSpace("ids").id);
+  const events: any[] = [];
+  runtime.onEvent((ev) => events.push(ev));
+  runtime.attachCdpForwarding();
+
+  await runtime.handle("sendCDPMessage", {
+    payload: JSON.stringify({ id: 1, method: "Runtime.evaluate", params: {} }),
+  });
+  const sent = fakeCdp.rawSent[0] as { id: number };
+  assert.notEqual(sent.id, 1);
+
+  // The daemon's own Target.getTargets reply, id 1: not the harness's business.
+  fakeCdp.deliverMessage({ id: 1, result: { targetInfos: [] } });
+  assert.equal(events.length, 0);
+
+  // The reply to the harness request comes back under the harness's id.
+  fakeCdp.deliverMessage({ id: sent.id, result: { result: { value: 8 } } });
+  assert.equal(events.length, 1);
+  assert.deepEqual(JSON.parse(events[0].params.payload), {
+    id: 1,
+    result: { result: { value: 8 } },
+  });
 });
 
 test("handle accepts ego. prefix methods", async () => {
@@ -650,4 +1215,41 @@ test("sem atividade, o overlay cai para o estado parado", async () => {
     evaluates.filter((e) => e.includes('setState("idle"')).length,
     1,
   );
+});
+
+test("Target.activateTarget makes that tab active for listTabs and snapshot across rounds", async () => {
+  const { sm, fakeCdp, runtime } = setup();
+  sm.use(sm.createAgentSpace("a2").id);
+  const { targetId: first } = await runtime.handle("createTab", {
+    url: "https://example.com",
+  });
+  await runtime.handle("createTab", { url: "https://en.wikipedia.org" });
+  // The harness's switchTab sends this raw; the host must remember it.
+  await runtime.handle("sendCDPMessage", {
+    payload: JSON.stringify({
+      id: 7,
+      method: "Target.activateTarget",
+      params: { targetId: first },
+    }),
+  });
+
+  const { tabs } = await runtime.handle("listTabs", {});
+  assert.deepEqual(
+    tabs.map((t: { targetId: string; active: boolean }) => [t.targetId, t.active]),
+    [[first, true], ["T2", false]],
+  );
+
+  // snapshot attaches to the same tab, not to the last one Chrome lists.
+  const sessions: unknown[] = [];
+  const send = fakeCdp.send;
+  fakeCdp.send = async (method, params, sessionId) => {
+    if (method === "Accessibility.getFullAXTree") sessions.push(sessionId);
+    return send(method, params, sessionId);
+  };
+  await runtime.handle("snapshot", {});
+  assert.deepEqual(sessions, [`session-${first}`]);
+
+  // Selection survives the tab list order and a daemon restart via persistence.
+  sm.reconcileTargets(["T2"]);
+  assert.equal(sm.activeTargetForSelected(), "T2");
 });

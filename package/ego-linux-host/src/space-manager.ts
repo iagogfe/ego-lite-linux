@@ -1,5 +1,20 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { makeEgoError } from "./errors.js";
+
+/**
+ * Which client's selection the current call sees. The daemon runs every RPC
+ * inside `runForClient`, so concurrent `ego-browser` processes never read each
+ * other's cursor. Outside any client (startup, tests) the manager falls back to
+ * a single process-wide selection.
+ */
+const clientScope = new AsyncLocalStorage<string>();
+
+/** Id of the connection whose RPC is running, when there is one. */
+export function currentClientId(): string | undefined {
+  return clientScope.getStore();
+}
 
 export type Ownership = "agent" | "agentDelegatedToUser" | "user";
 
@@ -11,6 +26,10 @@ export type Space = {
   ownership: Ownership;
   recentTabTitles?: string[];
   targetIds: string[];
+  /** Tab the agent last created/activated here; survives across heredoc rounds. */
+  activeTargetId?: string;
+  /** Last time an agent selected this space or moved a tab into it. */
+  lastUsedAt?: number;
 };
 
 export type UseResult =
@@ -53,11 +72,43 @@ function cloneSpace(space: Space): Space {
 export class SpaceManager {
   private readonly persistPath: string | undefined;
   private nextId = USER_SPACE_ID + 1;
+  /** Selection outside any client scope (startup, direct use in tests). */
   private selectedId: number | null = null;
+  private readonly selections = new Map<string, number>();
   private spaces: Space[] = [bootstrapUserSpace()];
 
   constructor(persistPath?: string) {
     this.persistPath = persistPath;
+  }
+
+  /**
+   * Run `fn` with the task-space selection scoped to `clientId`.
+   * A client that never selected sees no space: inheriting another client's
+   * selection is what let one agent's tab land in another agent's space.
+   */
+  runForClient<T>(clientId: string, fn: () => T): T {
+    return clientScope.run(clientId, fn);
+  }
+
+  /** Drop a disconnected client's selection so the map cannot grow forever. */
+  releaseClient(clientId: string): void {
+    this.selections.delete(clientId);
+  }
+
+  private currentSelection(): number | null {
+    const clientId = clientScope.getStore();
+    if (clientId === undefined) return this.selectedId;
+    return this.selections.get(clientId) ?? null;
+  }
+
+  private setSelection(id: number | null): void {
+    const clientId = clientScope.getStore();
+    if (clientId === undefined) {
+      this.selectedId = id;
+      return;
+    }
+    if (id === null) this.selections.delete(clientId);
+    else this.selections.set(clientId, id);
   }
 
   async load(): Promise<void> {
@@ -103,6 +154,12 @@ export class SpaceManager {
           targetIds: Array.isArray(entry.targetIds)
             ? entry.targetIds.filter((t): t is string => typeof t === "string")
             : [],
+          ...(typeof entry.activeTargetId === "string"
+            ? { activeTargetId: entry.activeTargetId }
+            : {}),
+          ...(typeof entry.lastUsedAt === "number"
+            ? { lastUsedAt: entry.lastUsedAt }
+            : {}),
           ...(Array.isArray(entry.recentTabTitles)
             ? {
                 recentTabTitles: entry.recentTabTitles.filter(
@@ -158,11 +215,70 @@ export class SpaceManager {
   /** Do not carry the last daemon selection into a new browser session. */
   clearSelection(): void {
     this.selectedId = null;
+    this.selections.clear();
   }
 
   /** Internal list including targetIds. */
   list(): Space[] {
     return this.spaces.map(cloneSpace);
+  }
+
+  /**
+   * Drop agent-owned spaces that hold no tab. Returns how many were removed.
+   * `minAgeMs` protects spaces touched recently, for callers that run while
+   * other clients are mid-creation.
+   * Run after reconcileTargets on startup: a space whose tabs are all gone has
+   * no work left to preserve, and without this the file grows without bound
+   * (measured: 77 of 84 spaces empty). User-owned spaces are never touched.
+   */
+  pruneEmptyAgentSpaces(minAgeMs = 0, now = Date.now()): number {
+    const inUse = new Set(this.selections.values());
+    if (this.selectedId !== null) inUse.add(this.selectedId);
+    const before = this.spaces.length;
+    this.spaces = this.spaces.filter(
+      (s) =>
+        s.ownership !== "agent" ||
+        s.targetIds.length > 0 ||
+        inUse.has(s.id) ||
+        // A space is created before it is selected or filled: pruning inside
+        // that window deletes another client's space out from under it.
+        now - (s.lastUsedAt ?? 0) < minAgeMs,
+    );
+    const removed = before - this.spaces.length;
+    if (removed > 0) {
+      const live = new Set(this.spaces.map((s) => s.id));
+      if (this.selectedId !== null && !live.has(this.selectedId)) {
+        this.selectedId = null;
+      }
+      for (const [clientId, id] of this.selections) {
+        if (!live.has(id)) this.selections.delete(clientId);
+      }
+    }
+    return removed;
+  }
+
+  /**
+   * Agent spaces nobody has touched for `maxAgeMs`. Removes them and returns
+   * the tabs the caller should close in Chrome.
+   *
+   * Nothing else is collected, and the exclusions are the point: a space a
+   * live client has selected is in use, a `user` space holds the person's own
+   * tabs, and `agentDelegatedToUser` means the person was handed control.
+   * Closing a tab is irreversible, so anything ambiguous is left alone.
+   */
+  collectStaleAgentSpaces(maxAgeMs: number, now = Date.now()): string[] {
+    const inUse = new Set(this.selections.values());
+    if (this.selectedId !== null) inUse.add(this.selectedId);
+    const stale = this.spaces.filter(
+      (s) =>
+        s.ownership === "agent" &&
+        !inUse.has(s.id) &&
+        now - (s.lastUsedAt ?? 0) > maxAgeMs,
+    );
+    if (stale.length === 0) return [];
+    const staleIds = new Set(stale.map((s) => s.id));
+    this.spaces = this.spaces.filter((s) => !staleIds.has(s.id));
+    return stale.flatMap((s) => s.targetIds);
   }
 
   /** Public records without targetIds (ego listTaskSpaces shape). */
@@ -189,6 +305,7 @@ export class SpaceManager {
       createdBy: "agent",
       ownership: "agent",
       targetIds: [],
+      lastUsedAt: Date.now(),
     };
     this.spaces.push(space);
     return cloneSpace(space);
@@ -203,7 +320,8 @@ export class SpaceManager {
         error: `task space not found: ${id}`,
       };
     }
-    this.selectedId = id;
+    space.lastUsedAt = Date.now();
+    this.setSelection(id);
     return { ok: true, space: cloneSpace(space) };
   }
 
@@ -218,7 +336,8 @@ export class SpaceManager {
     if (name !== undefined && name !== "") {
       space.name = name;
     }
-    this.selectedId = id;
+    space.lastUsedAt = Date.now();
+    this.setSelection(id);
     return cloneSpace(space);
   }
 
@@ -254,30 +373,50 @@ export class SpaceManager {
 
   /**
    * Close the selected space. Returns targetIds the host should close in Chrome.
-   * Protects bootstrap user space id 1 (clears its tabs, does not remove the space).
+   * Requires agent ownership. If the bootstrap user space was explicitly
+   * claimed, it clears its tabs without removing the space.
    */
   closeSelected(): string[] {
-    if (this.selectedId === null) return [];
-    const space = this.findSpace(this.selectedId);
-    if (!space) {
-      this.selectedId = null;
-      return [];
-    }
+    if (this.currentSelection() === null) return [];
+    const selected = this.requireAgentControl();
+    const space = this.findSpace(selected.id)!;
     const targetIds = [...space.targetIds];
     if (space.id === USER_SPACE_ID) {
       space.targetIds = [];
+      delete space.activeTargetId;
       space.ownership = "user";
-      this.selectedId = null;
+      this.setSelection(null);
       return targetIds;
     }
     this.spaces = this.spaces.filter((s) => s.id !== space.id);
-    this.selectedId = null;
+    this.setSelection(null);
     return targetIds;
   }
 
   selected(): Space | null {
     const space = this.selectedSpace();
     return space ? cloneSpace(space) : null;
+  }
+
+  /**
+   * Return the selected space only when the agent currently owns its control.
+   * All agent tab/page mutations must pass this guard before touching CDP.
+   */
+  requireAgentControl(): Space {
+    const space = this.selectedSpace();
+    if (!space) {
+      throw makeEgoError(
+        "EGO_TASK_SPACE_NOT_SELECTED",
+        "task space not selected",
+      );
+    }
+    if (space.ownership !== "agent") {
+      throw makeEgoError(
+        "EGO_TASK_SPACE_USER_IN_CONTROL",
+        "task space is under user control; claim or takeOver before browser operations",
+      );
+    }
+    return cloneSpace(space);
   }
 
   /**
@@ -293,7 +432,7 @@ export class SpaceManager {
   }
 
   assignTarget(targetId: string, spaceId?: number): void {
-    const destId = spaceId ?? this.selectedId;
+    const destId = spaceId ?? this.currentSelection();
     if (destId === null || destId === undefined) {
       throw Object.assign(new Error("task space not selected"), {
         error_code: "EGO_TASK_SPACE_NOT_SELECTED",
@@ -308,22 +447,42 @@ export class SpaceManager {
     for (const s of this.spaces) {
       const idx = s.targetIds.indexOf(targetId);
       if (idx !== -1) s.targetIds.splice(idx, 1);
+      if (s.activeTargetId === targetId) delete s.activeTargetId;
     }
     if (!dest.targetIds.includes(targetId)) {
       dest.targetIds.push(targetId);
     }
+    // A tab that was just created for or moved into a space is the one the
+    // agent is about to use.
+    dest.activeTargetId = targetId;
+    dest.lastUsedAt = Date.now();
+  }
+
+  /** Record a Target.activateTarget on a tab of the selected space. */
+  activateTarget(targetId: string): void {
+    const space = this.selectedSpace();
+    if (space && space.targetIds.includes(targetId)) {
+      space.activeTargetId = targetId;
+      space.lastUsedAt = Date.now();
+    }
+  }
+
+  /**
+   * The tab `page` should attach to: the last activated one, else the last
+   * assigned. Null when the selected space has no tabs.
+   */
+  activeTargetForSelected(): string | null {
+    const space = this.selectedSpace();
+    if (!space) return null;
+    if (space.activeTargetId && space.targetIds.includes(space.activeTargetId)) {
+      return space.activeTargetId;
+    }
+    return space.targetIds[space.targetIds.length - 1] ?? null;
   }
 
   targetsForSelected(): string[] {
     const space = this.selectedSpace();
     return space ? [...space.targetIds] : [];
-  }
-
-  /** Agent-owned tabs that may be reused by the currently selected space. */
-  targetsForReusableTabs(): string[] {
-    return this.spaces
-      .filter((space) => space.ownership === "agent")
-      .flatMap((space) => space.targetIds);
   }
 
   /** Remove persisted memberships for targets that no longer exist in Chrome. */
@@ -333,6 +492,9 @@ export class SpaceManager {
       space.targetIds = space.targetIds.filter((targetId) =>
         live.has(targetId),
       );
+      if (space.activeTargetId && !live.has(space.activeTargetId)) {
+        delete space.activeTargetId;
+      }
     }
   }
 
@@ -362,13 +524,15 @@ export class SpaceManager {
   }
 
   private selectedSpace(): Space | undefined {
-    if (this.selectedId === null) return undefined;
-    return this.findSpace(this.selectedId);
+    const id = this.currentSelection();
+    if (id === null) return undefined;
+    return this.findSpace(id);
   }
 
   private resetBootstrap(): void {
     this.nextId = USER_SPACE_ID + 1;
     this.selectedId = null;
+    this.selections.clear();
     this.spaces = [bootstrapUserSpace()];
   }
 }

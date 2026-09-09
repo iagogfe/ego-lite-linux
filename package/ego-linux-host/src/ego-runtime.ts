@@ -2,18 +2,25 @@
  * Daemon-side implementations of globalThis.ego methods.
  *
  * Enforces Task Space isolation (listTabs / createTab) and user-control
- * blocks on snapshot / page-domain CDP.
+ * blocks on snapshot / page-domain and mutable browser-level CDP.
  */
 
 import type { CdpBridge } from "./cdp-bridge.js";
 import { makeEgoError } from "./errors.js";
 import type { RpcEvent } from "./rpc.js";
 import { snapshotPage, type SnapshotOptions } from "./snapshot-engine.js";
-import type { SpaceManager } from "./space-manager.js";
+import { currentClientId, type SpaceManager } from "./space-manager.js";
 
-/** Browser-level CDP domains that remain allowed under user control. */
+/** Browser-level CDP domains used for activity labeling. */
 function isBrowserLevelMethod(method: string): boolean {
   return method.startsWith("Target.") || method.startsWith("Browser.");
+}
+
+/** The only browser-level command allowed without agent ownership. */
+const READ_ONLY_BROWSER_METHODS = new Set(["Browser.getVersion"]);
+
+function isReadOnlyBrowserMethod(method: string): boolean {
+  return READ_ONLY_BROWSER_METHODS.has(method);
 }
 
 export type EgoRuntimeDeps = {
@@ -26,7 +33,26 @@ export type EgoRuntimeDeps = {
   idleAfterMs?: number;
   /** Minimum time a label stays on screen before the next one (default 800ms). */
   labelHoldMs?: number;
+  /** Idle time after which an agent space's tabs are closed (default 2h). */
+  staleSpaceTtlMs?: number;
+  /**
+   * Viewport applied to each tab the agent creates. Set only in headless,
+   * where there is no real window to inherit a size from.
+   */
+  viewport?: { width: number; height: number };
+  /** Operational log for events a user would need explained (tabs closed). */
+  log?: (line: string) => void;
+  /** Cap on one client's focus turn (default 2s; tests shrink it). */
+  focusMaxMs?: number;
 };
+
+/**
+ * How long an agent task space may sit untouched before its tabs are closed.
+ * ponytail: a fixed 2h, tuned by EGO_AGENT_SPACE_TTL_MS. Heredoc rounds are
+ * seconds apart, so 2h of silence means the session is over; raise it if
+ * someone runs genuinely long-lived spaces.
+ */
+export const DEFAULT_STALE_SPACE_TTL_MS = 2 * 60 * 60 * 1000;
 
 /** Filler label: the harness reads the page constantly between real actions. */
 export const READING = "lendo página";
@@ -65,6 +91,8 @@ export function actionLabel(cdpMethod: string): string {
 
 export type EgoRuntime = {
   handle(method: string, params?: any): Promise<any>;
+  /** A client disconnected: drop anything it still holds (focus lease). */
+  releaseClient(clientId: string): void;
   /** Subscribe to runtime-pushed events (cdp.message, cdp.sendError). */
   onEvent(handler: (ev: RpcEvent) => void): () => void;
   /**
@@ -247,6 +275,33 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
     };
   }
 
+  // The harness and the daemon share one CDP socket, each with its own id
+  // counter starting at 1. Harness ids are rewritten into a range the daemon's
+  // counter never reaches, so a response can only ever land on its own sender,
+  // and only responses the harness asked for are forwarded back (with the
+  // harness's original id restored). Events carry no id and always pass.
+  // The sender is recorded too: every harness numbers from 1, so broadcasting
+  // a response would let another process match it to its own pending request.
+  // ponytail: 1e9 offset assumes the daemon sends < 1e9 CDP requests per life.
+  const HARNESS_ID_BASE = 1_000_000_000;
+  let nextHarnessId = HARNESS_ID_BASE;
+  const harnessIds = new Map<
+    number,
+    {
+      originalId: unknown;
+      clientId: string | undefined;
+      /** This message took the focus lease and must give it back on reply. */
+      holdsFocus?: boolean;
+      /** Enough to send this read again if the lease is taken mid-flight. */
+      payload?: Record<string, unknown>;
+      targetId?: string | null;
+      /** Shared with the retry: the first reply to arrive wins. */
+      answered?: { done: boolean };
+      /** Already re-queued once; a second preemption fails it instead. */
+      retried?: boolean;
+    }
+  >();
+
   function attachCdpForwarding(): () => void {
     if (detachCdp) {
       detachCdp();
@@ -254,7 +309,28 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
     }
     const cdp = deps.getCdp();
     const handler = (msg: any) => {
-      emit({ event: "cdp.message", params: { payload: JSON.stringify(msg) } });
+      let to: string | undefined;
+      if (msg && msg.id != null) {
+        const entry = harnessIds.get(msg.id);
+        if (!entry) return;
+        harnessIds.delete(msg.id);
+        to = entry.clientId;
+        if (entry.holdsFocus) {
+          focusInFlight = Math.max(0, focusInFlight - 1);
+          if (entry.clientId) releaseFocus(entry.clientId);
+        }
+        // A re-queued read has two ids in flight; only the first reply counts.
+        if (entry.answered) {
+          if (entry.answered.done) return;
+          entry.answered.done = true;
+        }
+        msg = { ...msg, id: entry.originalId };
+      }
+      emit({
+        ...(to !== undefined ? { to } : {}),
+        event: "cdp.message",
+        params: { payload: JSON.stringify(msg) },
+      });
     };
     detachCdp = cdp.onMessage(handler);
     return () => {
@@ -276,14 +352,26 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
   }
 
   async function listTabs(): Promise<{ tabs: any[] }> {
+    // No selected space is kept as an empty view for daemon startup. Once a
+    // space is selected, tab metadata is private to the agent-owned space.
+    if (deps.spaceManager.selected()) {
+      deps.spaceManager.requireAgentControl();
+    }
     const allowed = new Set(deps.spaceManager.targetsForSelected());
     const all = await deps.getCdp().listPageTargets();
     const filtered = all.filter((t) => allowed.has(t.targetId));
+    // The harness attaches `page` to the tab flagged active, so this must be
+    // the space's own record, not Chrome's list order (which is arbitrary and
+    // ignores Target.activateTarget).
+    const recorded = deps.spaceManager.activeTargetForSelected();
+    const activeId = filtered.some((t) => t.targetId === recorded)
+      ? recorded
+      : filtered[filtered.length - 1]?.targetId;
     const tabs = filtered.map((t, index) => ({
       targetId: t.targetId,
       title: t.title,
       url: t.url,
-      active: index === filtered.length - 1,
+      active: t.targetId === activeId,
       index,
     }));
     return { tabs };
@@ -292,25 +380,59 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
   async function createTab(params: { url?: string } = {}): Promise<{
     targetId: string;
   }> {
-    const selected = deps.spaceManager.selected();
-    if (!selected) {
-      throw makeEgoError(
-        "EGO_TASK_SPACE_NOT_SELECTED",
-        "task space not selected",
-      );
-    }
+    deps.spaceManager.requireAgentControl();
     const url =
       typeof params?.url === "string" && params.url !== ""
         ? params.url
         : "about:blank";
+    // Chrome focuses a tab the moment it is created, which silently takes
+    // focus from whoever holds the lease and leaves their read hanging. The
+    // creator is not reading, so focus goes straight back to the holder.
+    const readerTab = focusedTargetId;
+    const readerId = focusHolder;
     const targetId = await deps.getCdp().createTarget(url);
+    focusedTargetId = targetId;
     deps.spaceManager.assignTarget(targetId);
+    await applyViewport(targetId);
+    if (readerTab && readerId !== null && readerId !== currentClientId()) {
+      await ensureTabActive(readerTab);
+    }
     return { targetId };
   }
 
   /**
-   * Find an agent-owned tab by URL and move it into the selected agent space.
-   * User-owned and handed-off spaces are deliberately excluded.
+   * Give a freshly created agent tab the launch viewport.
+   *
+   * `--window-size` cannot do this: it sizes the window and Chrome subtracts
+   * its own UI, so the viewport arrives short by an amount that varies. This
+   * is the same command `page.setViewportSize` uses, and it is applied once at
+   * creation, so an agent that sets its own size later simply wins.
+   */
+  async function applyViewport(targetId: string): Promise<void> {
+    const viewport = deps.viewport;
+    if (!viewport) return;
+    try {
+      const cdp = deps.getCdp();
+      const sessionId = await cdp.attach(targetId);
+      await cdp.send(
+        "Emulation.setDeviceMetricsOverride",
+        {
+          width: viewport.width,
+          height: viewport.height,
+          deviceScaleFactor: 0,
+          mobile: false,
+        },
+        sessionId,
+      );
+    } catch {
+      // Never fail tab creation over the viewport; the tab still works.
+    }
+  }
+
+  /**
+   * Find a matching tab **inside the selected agent space**. Tabs of other
+   * spaces are never candidates: moving one would hand this agent another
+   * agent's page and leave that space empty without any signal.
    */
   async function findReusableTab(
     params: {
@@ -327,19 +449,14 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
     }
 
     const match = isUrlMatchMode(params?.match) ? params.match : "origin";
-    const reusableIds = new Set(deps.spaceManager.targetsForReusableTabs());
-    const pages = await deps.getCdp().listPageTargets();
     const selectedIds = new Set(selected.targetIds);
+    const pages = await deps.getCdp().listPageTargets();
     const matching = pages.filter(
       (page) =>
-        reusableIds.has(page.targetId) &&
+        selectedIds.has(page.targetId) &&
         tabMatchesUrl(page.url, params.url!, match),
     );
-    // Prefer a tab already in the selected space; otherwise reuse the latest
-    // matching agent tab returned by Chrome.
-    const existing =
-      matching.find((page) => selectedIds.has(page.targetId)) ||
-      matching[matching.length - 1];
+    const existing = matching[matching.length - 1];
     if (!existing) {
       return null;
     }
@@ -352,6 +469,272 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
     };
   }
 
+  /**
+   * Attach to the space's recorded active tab, the same one listTabs flags for
+   * the harness. Falls back to deps.ensureSession (last live tab) when the
+   * recorded tab is gone.
+   */
+  /**
+   * Chrome answers accessibility queries only for the tab it has focused:
+   * on any other tab `Accessibility.queryAXTree` never replies and the caller
+   * dies on the 15s timeout. Task spaces hand each client its own tab, so the
+   * tab a client is about to read is usually NOT the focused one.
+   *
+   * Activating is idempotent and cheap, and we already track the focused tab
+   * (the harness's own `Target.activateTarget` goes through sendCDPMessage),
+   * so a client that keeps working in one space pays for it once.
+   */
+  let focusedTargetId: string | null = null;
+
+  /**
+   * Only one tab can be focused, so accessibility reads take turns: activate,
+   * read, release. Without this two clients steal focus from each other and
+   * whoever activated last is the only one that answers — the rest hang until
+   * the CDP timeout. Serialized they cost ~400ms each; that is the price of
+   * Chrome having a single focused tab, not a queue we chose to add.
+   */
+  let focusHolder: string | null = null;
+  const focusWaiters: Array<{ clientId: string; resolve: () => void }> = [];
+  /** Reads of the holder still awaiting a reply. Handing the lease over now
+   * would leave them hanging: activating another tab is what kills them. */
+  let focusInFlight = 0;
+  let focusDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /**
+   * A wedged renderer never answers, and its lease would hold the queue for
+   * the whole CDP timeout. Past this the lease is handed on: the stuck read is
+   * already doomed, and everyone else waits seconds, not a timeout.
+   * ponytail: fixed cap, ~5x a heavy wikipedia read (300-400ms measured
+   * inside the turn); raise it if a legitimate read ever loses focus here.
+   */
+  const FOCUS_MAX_MS = deps.focusMaxMs ?? 2000;
+
+  function armFocusDeadline(): void {
+    if (focusDeadlineTimer) clearTimeout(focusDeadlineTimer);
+    focusDeadlineTimer = setTimeout(() => {
+      const victim = focusHolder;
+      const orphans = victim === null ? [] : orphanedReads(victim);
+      // Daemon-side reads (snapshot) are not in the id map: count them.
+      const daemonSide = Math.max(0, focusInFlight - orphans.length);
+      const parts: string[] = [];
+      if (orphans.length > 0) {
+        // Aggregated, never enumerated: one wedged client can pile up over a
+        // thousand identical reads, and a single log line that lists them all
+        // is 58KB of the same text.
+        const groups = new Map<string, number>();
+        for (const o of orphans) {
+          const space = o.entry.targetId
+            ? (deps.spaceManager.spaceIdForTarget(o.entry.targetId) ?? "?")
+            : "?";
+          const key = `${o.method} space=${space} tab=${String(
+            o.entry.targetId ?? "?",
+          ).slice(0, 8)} ${o.retry ? "re-queued" : "failed (stuck twice)"}`;
+          groups.set(key, (groups.get(key) ?? 0) + 1);
+        }
+        for (const [key, count] of groups) parts.push(`${count}x ${key}`);
+      }
+      if (daemonSide > 0) {
+        const space =
+          deps.spaceManager.spaceIdForTarget(focusedTargetId ?? "") ?? "?";
+        parts.push(
+          `${daemonSide}x snapshot space=${space} tab=${String(
+            focusedTargetId ?? "?",
+          ).slice(0, 8)} kept reading without the turn`,
+        );
+      }
+      if (parts.length > 0) {
+        deps.log?.(
+          `focus turn taken from client ${victim} after ${FOCUS_MAX_MS}ms: ` +
+            parts.join("; "),
+        );
+      }
+      passFocus();
+      for (const orphan of orphans) {
+        if (orphan.retry) void resendRead(orphan);
+        else
+          failRead(
+            orphan.entry,
+            `ego-host: this tab did not answer ${orphan.method} within ` +
+              `${FOCUS_MAX_MS}ms twice; its renderer looks stuck (page in a ` +
+              `long-running script?). Other task spaces were waiting.`,
+          );
+      }
+    }, FOCUS_MAX_MS);
+    focusDeadlineTimer.unref?.();
+  }
+
+  /**
+   * Reads of `clientId` that were in flight when its turn was taken. Chrome
+   * will not answer them now that another tab has focus, so they are dropped
+   * from the id map and sent again once this client's turn comes back.
+   */
+  function orphanedReads(
+    clientId: string,
+  ): Array<{ id: number; method: string; entry: any; retry: boolean }> {
+    const orphans: Array<{
+      id: number;
+      method: string;
+      entry: any;
+      retry: boolean;
+    }> = [];
+    for (const [id, entry] of harnessIds) {
+      if (entry.holdsFocus && entry.clientId === clientId && entry.payload) {
+        orphans.push({
+          id,
+          method: String(entry.payload.method ?? "?"),
+          entry,
+          // Preempted twice means the tab is not coming back: retrying again
+          // would let one wedged renderer hold a turn every 2s forever.
+          retry: !entry.retried,
+        });
+        harnessIds.delete(id);
+      }
+    }
+    return orphans;
+  }
+
+  /**
+   * Answer the harness ourselves so a client whose tab is wedged fails in
+   * seconds instead of waiting out its own CDP timeout (30s for
+   * getFullAXTree) while everyone queues behind it.
+   */
+  function failRead(entry: any, why: string): void {
+    if (entry.answered?.done) return;
+    if (entry.answered) entry.answered.done = true;
+    emit({
+      ...(entry.clientId !== undefined ? { to: entry.clientId } : {}),
+      event: "cdp.message",
+      params: {
+        payload: JSON.stringify({
+          id: entry.originalId,
+          error: { code: -32000, message: why },
+        }),
+      },
+    });
+  }
+
+  /**
+   * Send an orphaned read again: wait for the client's turn, focus its tab,
+   * and reissue under a new id. Both ids stay mapped to the harness's original
+   * id and share an `answered` flag, so whichever reply lands first is the one
+   * forwarded and the other is discarded.
+   */
+  async function resendRead(orphan: {
+    id: number;
+    method: string;
+    entry: any;
+  }): Promise<void> {
+    const { entry } = orphan;
+    const clientId = entry.clientId;
+    if (!clientId || entry.answered?.done) return;
+    try {
+      await acquireFocus(clientId);
+      if (entry.answered?.done) {
+        releaseFocus(clientId);
+        return;
+      }
+      focusInFlight++;
+      if (entry.targetId) await ensureTabActive(entry.targetId);
+      const retryId = nextHarnessId++;
+      harnessIds.set(retryId, { ...entry, retried: true });
+      deps.getCdp().sendRaw({ ...entry.payload, id: retryId });
+    } catch {
+      // The read simply stays unanswered; the harness times out as before.
+    }
+  }
+
+  /** Hand the lease to the next waiter, or leave it free. */
+  function passFocus(): void {
+    if (focusDeadlineTimer) clearTimeout(focusDeadlineTimer);
+    focusDeadlineTimer = undefined;
+    focusInFlight = 0;
+    const next = focusWaiters.shift();
+    if (next) {
+      focusHolder = next.clientId;
+      armFocusDeadline();
+      next.resolve();
+    } else {
+      focusHolder = null;
+    }
+  }
+
+  /**
+   * Take the focus lease, waiting for the current holder.
+   *
+   * The holder reenters freely, which is what keeps the several
+   * `Accessibility.*` messages of one getByRole from losing focus midway. It
+   * is safe to reenter only because a holder with nothing in flight gives the
+   * lease up the moment someone queues (see releaseFocus) — otherwise a client
+   * reading in a loop never lets go and newcomers starve behind a whole
+   * rotation instead of one turn.
+   */
+  async function acquireFocus(clientId: string): Promise<void> {
+    if (focusHolder === clientId) return;
+    if (focusHolder === null) {
+      focusHolder = clientId;
+      armFocusDeadline();
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      focusWaiters.push({ clientId, resolve });
+    });
+  }
+
+  /**
+   * End of one read. Pass the lease on when someone is waiting and nothing is
+   * in flight — between two messages there is no read to kill, so yielding
+   * here costs the next message a turn and costs nobody a hang.
+   */
+  function releaseFocus(clientId: string): void {
+    if (focusHolder !== clientId) return;
+    if (focusInFlight > 0) return;
+    if (focusWaiters.length > 0) passFocus();
+  }
+
+  /** Run one whole AX operation holding the lease (daemon-side reads). */
+  async function withFocus<T>(operation: () => Promise<T>): Promise<T> {
+    const clientId = currentClientId() ?? "local";
+    await acquireFocus(clientId);
+    // Counted like a harness read: a late reply from this same client would
+    // otherwise see nothing in flight and hand the lease away mid-snapshot,
+    // which activates another tab and hangs this read until the CDP timeout.
+    focusInFlight++;
+    try {
+      return await operation();
+    } finally {
+      focusInFlight = Math.max(0, focusInFlight - 1);
+      releaseFocus(clientId);
+    }
+  }
+
+  async function ensureTabActive(targetId: string): Promise<void> {
+    if (focusedTargetId === targetId) return;
+    try {
+      await deps.getCdp().send("Target.activateTarget", { targetId });
+      focusedTargetId = targetId;
+    } catch {
+      // Best effort: a closed tab surfaces on the operation that follows.
+    }
+  }
+
+  /**
+   * @param focus whether the tab must be the focused one. Accessibility reads
+   * need it; cosmetic work must not take focus from whoever is reading.
+   */
+  async function ensureActiveSession(focus = true): Promise<string> {
+    const activeId = deps.spaceManager.activeTargetForSelected();
+    if (activeId) {
+      try {
+        const sessionId = await deps.getCdp().attach(activeId);
+        if (focus) await ensureTabActive(activeId);
+        return sessionId;
+      } catch {
+        // target closed since it was recorded
+      }
+    }
+    return deps.ensureSession();
+  }
+
   async function snapshot(params: SnapshotOptions = {}): Promise<{
     content: string;
     refs: any[];
@@ -362,9 +745,13 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
         "task space is under user control; claim or takeOver before page ops",
       );
     }
-    const sessionId = await deps.ensureSession();
-    markActivity(READING);
-    return snapshotPage(deps.getCdp(), sessionId, params);
+    // Activate and read in one turn: another client stealing focus midway is
+    // what leaves this read hanging.
+    return withFocus(async () => {
+      const sessionId = await ensureActiveSession();
+      markActivity(READING);
+      return snapshotPage(deps.getCdp(), sessionId, params);
+    });
   }
 
   async function sendCDPMessage(params: {
@@ -391,10 +778,14 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
 
     const method = typeof msg?.method === "string" ? msg.method : "";
     const pageDomain = method ? !isBrowserLevelMethod(method) : true;
+    const selected = deps.spaceManager.selected();
+    const agentControlsSpace = selected?.ownership === "agent";
+    const safeWithoutAgentControl =
+      selected !== null && isReadOnlyBrowserMethod(method);
 
-    if (pageDomain && deps.spaceManager.isPageControlBlocked()) {
+    if (!agentControlsSpace && !safeWithoutAgentControl) {
       emitSendError(
-        "task space is under user control; claim or takeOver before page ops",
+        "task space is under user control; claim or takeOver before browser operations",
         "EGO_TASK_SPACE_USER_IN_CONTROL",
       );
       return { ok: true };
@@ -403,7 +794,49 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
     if (pageDomain) {
       markActivity(actionLabel(method));
     }
+    if (method === "Target.activateTarget") {
+      const targetId = msg?.params?.targetId;
+      if (typeof targetId === "string") {
+        // Focusing a tab is what kills another client's in-flight read, so it
+        // waits its turn like a read does. It is instant, so the lease goes
+        // back right away: this client keeps focus only until someone reads.
+        const clientId = currentClientId() ?? "local";
+        await acquireFocus(clientId);
+        deps.spaceManager.activateTarget(targetId);
+        focusedTargetId = targetId;
+        releaseFocus(clientId);
+      }
+    }
+    // The harness reads the AX tree directly (getByRole and friends). Same
+    // trap as snapshot, but fire-and-forget: the lease is held here and
+    // released when the reply comes back (see attachCdpForwarding), so the
+    // whole role operation owns the focus instead of each message.
+    if (method.startsWith("Accessibility.")) {
+      const clientId = currentClientId() ?? "local";
+      await acquireFocus(clientId);
+      focusInFlight++;
+      const targetId = deps.spaceManager.activeTargetForSelected();
+      if (targetId) await ensureTabActive(targetId);
+    }
 
+    if (msg && msg.id != null) {
+      const rewritten = nextHarnessId++;
+      const isAxRead = method.startsWith("Accessibility.");
+      harnessIds.set(rewritten, {
+        originalId: msg.id,
+        clientId: currentClientId(),
+        ...(isAxRead
+          ? {
+              holdsFocus: true,
+              // Kept so the read can be reissued if its turn is taken.
+              payload: { ...msg, id: undefined },
+              targetId: deps.spaceManager.activeTargetForSelected(),
+              answered: { done: false },
+            }
+          : {}),
+      });
+      msg = { ...msg, id: rewritten };
+    }
     try {
       deps.getCdp().sendRaw(msg);
     } catch (err) {
@@ -424,11 +857,83 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
     return { ok: true };
   }
 
+  /**
+   * Task spaces with their tabs, so choosing one does not require selecting
+   * each in turn (useOrCreate has the side effect of selecting).
+   *
+   * `tabCount` is reported for every space, but tab urls/titles only for
+   * agent-owned ones: the user space holds the person's own browsing and
+   * listing spaces must not turn into a window onto it.
+   */
   async function listTaskSpaces() {
-    return { taskSpaces: deps.spaceManager.listPublic() };
+    const spaces = deps.spaceManager.list();
+    let byTarget = new Map<string, { title: string; url: string }>();
+    try {
+      const pages = await deps.getCdp().listPageTargets();
+      byTarget = new Map(pages.map((p) => [p.targetId, p]));
+    } catch {
+      // No browser: still answer with the spaces and their counts.
+    }
+    const taskSpaces = spaces.map((space) => {
+      const { targetIds, ...rest } = space;
+      const live = targetIds.filter((id) => byTarget.has(id));
+      const record: Record<string, unknown> = {
+        ...publicSpace(space),
+        ...(space.recentTabTitles
+          ? { recentTabTitles: [...space.recentTabTitles] }
+          : {}),
+        tabCount: byTarget.size ? live.length : targetIds.length,
+      };
+      if (space.ownership !== "user") {
+        record.tabs = live.map((id) => ({
+          targetId: id,
+          title: byTarget.get(id)!.title,
+          url: byTarget.get(id)!.url,
+          active: id === space.activeTargetId,
+        }));
+      }
+      return record;
+    });
+    return { taskSpaces };
+  }
+
+  /**
+   * Close the tabs of agent spaces abandoned by earlier sessions. Nothing
+   * closes an agent tab today, so on a browser the person keeps open for days
+   * they pile up in their window. Runs when a new task space is created: a new
+   * agent task is the moment old ones are provably over, and it costs one CDP
+   * call per dead tab, off any hot path.
+   */
+  async function collectStaleSpaces(): Promise<void> {
+    const ttlMs = deps.staleSpaceTtlMs ?? DEFAULT_STALE_SPACE_TTL_MS;
+    if (ttlMs <= 0) return;
+    const targetIds = deps.spaceManager.collectStaleAgentSpaces(ttlMs);
+    if (targetIds.length > 0) {
+      // "Why did my tab disappear" has exactly one answer, and it is this one.
+      const idle =
+        ttlMs >= 60_000
+          ? `${Math.round(ttlMs / 60_000)}min`
+          : `${Math.round(ttlMs / 1000)}s`;
+      deps.log?.(
+        `closed ${targetIds.length} tab(s) from agent task spaces idle over ${idle}`,
+      );
+    }
+    for (const targetId of targetIds) {
+      try {
+        await deps.getCdp().send("Target.closeTarget", { targetId });
+      } catch {
+        // The tab may be gone already; the space record is dropped either way.
+      }
+    }
   }
 
   async function createTaskSpace(params: { name?: string } = {}) {
+    await collectStaleSpaces();
+    // A long-lived daemon otherwise accumulates every space ever created: the
+    // startup prune never runs. Spaces a live client selected are kept, so a
+    // space created a moment ago and not yet filled survives.
+    const pruned = deps.spaceManager.pruneEmptyAgentSpaces(60_000);
+    if (pruned > 0) deps.log?.(`pruned ${pruned} empty agent task space(s)`);
     const name =
       typeof params?.name === "string" && params.name !== ""
         ? params.name
@@ -493,12 +998,7 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
   }
 
   async function closeTaskSpace() {
-    if (!deps.spaceManager.selected()) {
-      throw makeEgoError(
-        "EGO_TASK_SPACE_NOT_SELECTED",
-        "task space not selected",
-      );
-    }
+    deps.spaceManager.requireAgentControl();
     const targetIds = deps.spaceManager.closeSelected();
     // Best-effort close page targets in Chrome
     const cdp = deps.getCdp();
@@ -542,7 +1042,9 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
   async function injectOverlay(call: string): Promise<{ ok: true }> {
     try {
       if (deps.spaceManager.isPageControlBlocked()) return { ok: true };
-      const sessionId = await deps.ensureSession();
+      // Painting a badge must never steal focus: another client may be
+      // mid-read, and its read dies the moment a different tab is focused.
+      const sessionId = await ensureActiveSession(false);
       await deps.getCdp().send(
         "Runtime.evaluate",
         {
@@ -676,7 +1178,18 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
     }
   }
 
-  return { handle, onEvent, attachCdpForwarding };
+  /**
+   * A process that exits mid-turn would otherwise keep the lease until the
+   * deadline, making every other client wait it out on each read.
+   */
+  function releaseClient(clientId: string): void {
+    for (let i = focusWaiters.length - 1; i >= 0; i--) {
+      if (focusWaiters[i]!.clientId === clientId) focusWaiters.splice(i, 1);
+    }
+    if (focusHolder === clientId) passFocus();
+  }
+
+  return { handle, onEvent, attachCdpForwarding, releaseClient };
 }
 
 function isUrlMatchMode(value: unknown): value is UrlMatchMode {

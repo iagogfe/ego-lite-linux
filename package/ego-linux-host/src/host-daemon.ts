@@ -7,14 +7,18 @@
  */
 
 import { createServer, type Server, type Socket } from "node:net";
+import { appendFileSync, existsSync, statSync, truncateSync } from "node:fs";
 import { mkdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { pingSocket } from "./ego-client.js";
 import { setTimeout as sleep } from "node:timers/promises";
-import { connectCdp, type CdpBridge } from "./cdp-bridge.js";
+import { connectCdp, preloadWs, type CdpBridge } from "./cdp-bridge.js";
 import {
+  AGENT_VIEWPORT,
   ensureChrome,
   isCdpUp,
   type ChromeHandle,
+  type EnsureChromeOptions,
 } from "./chrome-supervisor.js";
 import { loadConfig, type HostConfig } from "./config.js";
 import { createEgoRuntime, type EgoRuntime } from "./ego-runtime.js";
@@ -49,9 +53,15 @@ export type HostDaemonOptions = {
   /** Skip real Chrome/CDP (unit/integration tests). */
   skipChrome?: boolean;
   /** Inject CDP bridge factory (defaults to connectCdp). */
-  connectCdp?: (port: number) => Promise<CdpBridge>;
+  connectCdp?: (
+    port: number,
+    webSocketDebuggerUrl?: string | null,
+  ) => Promise<CdpBridge>;
   /** Inject Chrome ensure (defaults to ensureChrome). */
-  ensureChrome?: (config: HostConfig) => Promise<ChromeHandle>;
+  ensureChrome?: (
+    config: HostConfig,
+    options?: EnsureChromeOptions,
+  ) => Promise<ChromeHandle>;
   /** Override attached-browser shutdown confirmation timeout (tests). */
   browserShutdownTimeoutMs?: number;
   /** Override spaces.json path. */
@@ -60,6 +70,11 @@ export type HostDaemonOptions = {
   pidPath?: string;
   /** Listen without writing pid (tests). */
   writePid?: boolean;
+  /**
+   * What to do when another daemon already serves the socket.
+   * Defaults to exiting quietly: a losing daemon is expected, not a crash.
+   */
+  onAlreadyRunning?: () => never | Promise<never>;
 };
 
 export type HostDaemon = {
@@ -69,6 +84,33 @@ export type HostDaemon = {
   runtime: EgoRuntime;
   close(): Promise<void>;
 };
+
+/** Truncated at this size on daemon start; lifecycle lines only, so it crawls. */
+const LOG_MAX_BYTES = 1_000_000;
+
+/**
+ * Operational log: one line per lifecycle event, never per request.
+ *
+ * It answers the two questions a user asks when the host misbehaves — why did
+ * the daemon restart, and why did my tab disappear — and nothing else. Traffic
+ * would drown both. Writes to the file rather than stdout so the record exists
+ * whether the daemon was spawned by the CLI or started by hand.
+ */
+export function createDaemonLog(dataDir: string): (line: string) => void {
+  const logPath = join(dataDir, "host.log");
+  try {
+    if (statSync(logPath).size > LOG_MAX_BYTES) truncateSync(logPath, 0);
+  } catch {
+    // No log yet, or not readable: nothing to rotate.
+  }
+  return (line: string) => {
+    try {
+      appendFileSync(logPath, `${new Date().toISOString()} ${line}\n`);
+    } catch {
+      // Diagnostics must never take the host down.
+    }
+  };
+}
 
 function errorToRpc(id: number, err: unknown): RpcResponse {
   const code =
@@ -122,6 +164,9 @@ export async function startDaemon(
   const dataDir = config.dataDir;
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
 
+  const log = createDaemonLog(dataDir);
+  const alreadyRunning =
+    options.onAlreadyRunning ?? (() => process.exit(0) as never);
   const spacesPath = options.spacesPath ?? join(dataDir, "spaces.json");
   const pidPath = options.pidPath ?? join(dataDir, "host.pid");
   const socketPath = config.hostSocket;
@@ -144,12 +189,21 @@ export async function startDaemon(
 
   if (!options.skipChrome) {
     try {
-      chrome = await ensureChromeFn(config);
-      cdp = await connectCdpFn(config.cdpPort);
+      chrome = await ensureChromeFn(config, {
+        onSpawn: () => void preloadWs(),
+      });
+      log(
+        chrome.pid > 0
+          ? `chrome spawned pid=${chrome.pid} port=${config.cdpPort}`
+          : `chrome attached port=${config.cdpPort} (already running)`,
+      );
+      cdp = await connectCdpFn(config.cdpPort, chrome.webSocketDebuggerUrl);
       // Adopt orphan page targets into user space
       try {
         const pages = await cdp.listPageTargets();
         spaceManager.reconcileTargets(pages.map((p) => p.targetId));
+        const pruned = spaceManager.pruneEmptyAgentSpaces();
+        if (pruned > 0) log(`pruned ${pruned} empty agent task space(s)`);
         spaceManager.adoptOrphanTargets(pages.map((p) => p.targetId));
         await spaceManager.save();
       } catch {
@@ -161,6 +215,7 @@ export async function startDaemon(
       // that never mentioned Chrome. ensureBrowserReady retries on the next
       // ego method, same path a mid-session Chrome death takes.
       chromeStartupError = err instanceof Error ? err.message : String(err);
+      log(`chrome unavailable: ${chromeStartupError}`);
       chrome = null;
       cdp = null;
     }
@@ -231,6 +286,12 @@ export async function startDaemon(
     getCdp,
     ensureSession,
     version: HOST_VERSION,
+    ...(config.agentSpaceTtlMs !== undefined
+      ? { staleSpaceTtlMs: config.agentSpaceTtlMs }
+      : {}),
+    // Headed inherits the size of the user's own window.
+    ...(config.headless ? { viewport: AGENT_VIEWPORT } : {}),
+    log,
   });
 
   let detachForward: (() => void) | undefined;
@@ -348,7 +409,9 @@ export async function startDaemon(
   async function ensureBrowserReady(): Promise<void> {
     if (options.skipChrome) return;
 
-    if (cdp && (await isCdpUp(config.cdpPort))) {
+    // An open WebSocket is the liveness signal; the HTTP probe is the fallback
+    // for bridges that cannot report it (~1-10ms per call on Chrome's side).
+    if (cdp && (cdp.isOpen ? cdp.isOpen() : await isCdpUp(config.cdpPort))) {
       return;
     }
 
@@ -357,9 +420,14 @@ export async function startDaemon(
     try {
       // ensureChrome attaches if CDP is already back, otherwise respawns Chrome.
       chrome = await ensureChromeFn(config);
-      cdp = await connectCdpFn(config.cdpPort);
+      cdp = await connectCdpFn(config.cdpPort, chrome.webSocketDebuggerUrl);
       detachForward = runtime.attachCdpForwarding();
       chromeStartupError = null;
+      log(
+        chrome.pid > 0
+          ? `browser reconnected: chrome respawned pid=${chrome.pid}`
+          : "browser reconnected: cdp bridge replaced",
+      );
     } catch (err) {
       const code =
         err &&
@@ -382,13 +450,53 @@ export async function startDaemon(
   }
 
   const clients = new Set<Socket>();
-  let lifecycleTail: Promise<void> = Promise.resolve();
+  const clientSockets = new Map<string, Socket>();
+  // Browser-swap gate: `reload` is the writer, every ego.* call is a reader.
+  let swapTail: Promise<unknown> = Promise.resolve();
+  let swapping = false;
+  let active = 0;
+  let onDrained: (() => void) | undefined;
 
-  function serializeBrowserLifecycle<T>(
-    operation: () => Promise<T>,
-  ): Promise<T> {
-    const result = lifecycleTail.then(operation, operation);
-    lifecycleTail = result.then(
+  /**
+   * ego.* calls run concurrently: they address independent CDP sessions, and
+   * one slow page must not hold the others. Serializing them made every client
+   * wait out the slowest — a snapshot that hit the 15s CDP timeout stalled
+   * every other client by 15s, once per client.
+   *
+   * They are only held back by a browser swap (`reload`), which replaces
+   * Chrome and the bridge underneath them.
+   */
+  async function runConcurrent<T>(operation: () => Promise<T>): Promise<T> {
+    while (swapping) {
+      await swapTail.catch(() => undefined);
+    }
+    // No await between the check and the increment: a swap cannot slip in.
+    active++;
+    try {
+      return await operation();
+    } finally {
+      if (--active === 0) onDrained?.();
+    }
+  }
+
+  /** `reload` swaps Chrome/CDP, so it waits for in-flight calls and runs alone. */
+  function runExclusive<T>(operation: () => Promise<T>): Promise<T> {
+    const run = async () => {
+      swapping = true;
+      try {
+        if (active > 0) {
+          await new Promise<void>((resolve) => {
+            onDrained = resolve;
+          });
+          onDrained = undefined;
+        }
+        return await operation();
+      } finally {
+        swapping = false;
+      }
+    };
+    const result = swapTail.then(run, run);
+    swapTail = result.then(
       () => undefined,
       () => undefined,
     );
@@ -421,7 +529,10 @@ export async function startDaemon(
         await shutdownBrowser();
         newChrome = await ensureChromeFn(requestedConfig);
         chrome = newChrome;
-        cdp = await connectCdpFn(requestedConfig.cdpPort);
+        cdp = await connectCdpFn(
+          requestedConfig.cdpPort,
+          newChrome.webSocketDebuggerUrl,
+        );
         detachForward = runtime.attachCdpForwarding();
         Object.assign(config, browserConfig(requestedConfig));
         chromeStartupError = null;
@@ -473,7 +584,14 @@ export async function startDaemon(
   }
 
   function broadcastEvent(ev: RpcEvent): void {
-    const line = encodeLine(ev);
+    const { to, ...wire } = ev;
+    const line = encodeLine(wire);
+    if (to !== undefined) {
+      // A CDP response belongs to one connection; the others must not see it.
+      const socket = clientSockets.get(to);
+      if (socket) writeToClient(socket, line);
+      return;
+    }
     for (const socket of clients) {
       writeToClient(socket, line);
     }
@@ -482,10 +600,27 @@ export async function startDaemon(
   runtime.onEvent(broadcastEvent);
 
   await mkdir(dirname(socketPath), { recursive: true, mode: 0o700 });
-  await safeUnlink(socketPath);
+  // A unix socket only reports EADDRINUSE while its file exists, so unlinking
+  // first would let this daemon bind over a live one and serve the same path
+  // twice. Only a socket that answers nothing gets removed.
+  if (existsSync(socketPath)) {
+    if (await pingSocket(socketPath, 1000)) {
+      process.stderr.write(
+        `${new Date().toISOString()} another ego-linux-hostd already serves ${socketPath}; exiting\n`,
+      );
+      await alreadyRunning();
+    }
+    await safeUnlink(socketPath);
+  }
+
+  let nextClientId = 1;
 
   const server: Server = createServer((socket) => {
     clients.add(socket);
+    // Task-space selection is per connection: one ego-browser process must not
+    // see (or overwrite) the space another one selected between two RPCs.
+    const clientId = String(nextClientId++);
+    clientSockets.set(clientId, socket);
     const lineBuf = new LineBuffer();
 
     socket.on("data", (chunk) => {
@@ -500,12 +635,12 @@ export async function startDaemon(
               return;
             }
             id = msg.id;
-            const result =
-              msg.method === "reload" || msg.method.startsWith("ego.")
-                ? await serializeBrowserLifecycle(() =>
-                    handleRequest(msg.method, msg.params),
-                  )
-                : await handleRequest(msg.method, msg.params);
+            const result = await spaceManager.runForClient(clientId, () => {
+              const call = () => handleRequest(msg.method, msg.params);
+              if (msg.method === "reload") return runExclusive(call);
+              if (msg.method.startsWith("ego.")) return runConcurrent(call);
+              return call();
+            });
             writeToClient(socket, encodeLine({ id, result }));
           } catch (err) {
             if (id >= 0) {
@@ -518,19 +653,37 @@ export async function startDaemon(
 
     socket.on("close", () => {
       clients.delete(socket);
+      clientSockets.delete(clientId);
+      spaceManager.releaseClient(clientId);
+      runtime.releaseClient(clientId);
     });
     socket.on("error", () => {
       clients.delete(socket);
+      clientSockets.delete(clientId);
+      spaceManager.releaseClient(clientId);
+      runtime.releaseClient(clientId);
     });
   });
 
   await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
+    server.once("error", (err: NodeJS.ErrnoException) => {
+      // Narrow race: the winner created the socket after the check above.
+      if (err.code === "EADDRINUSE") {
+        process.stderr.write(
+          `${new Date().toISOString()} another ego-linux-hostd already serves ${socketPath}; exiting\n`,
+        );
+        void alreadyRunning();
+        return;
+      }
+      reject(err);
+    });
     server.listen(socketPath, () => {
       server.removeListener("error", reject);
       resolve();
     });
   });
+
+  log(`daemon listening pid=${process.pid} socket=${socketPath}`);
 
   if (options.writePid !== false) {
     await writeFile(pidPath, String(process.pid), "utf8");
@@ -540,6 +693,7 @@ export async function startDaemon(
   async function close(): Promise<void> {
     if (closed) return;
     closed = true;
+    log(`daemon stopping pid=${process.pid}`);
     if (detachForward) {
       detachForward();
       detachForward = undefined;
@@ -555,6 +709,10 @@ export async function startDaemon(
     await new Promise<void>((resolve) => {
       server.close(() => resolve());
     });
+    // ponytail: no ownership guard here — libuv already unlinks the pipe path
+    // inside server.close(), whoever owns the file by then. The defense that
+    // works is upstream: never unlink a socket that still answers, so a second
+    // daemon never takes this path while this one serves it.
     await safeUnlink(socketPath);
     if (options.writePid !== false) {
       await safeUnlink(pidPath);
@@ -607,7 +765,9 @@ async function buildDoctor(
   chromeError: string | null = null,
 ): Promise<Record<string, unknown>> {
   const cdpUp = await isCdpUp(config.cdpPort);
-  const chromePid = chrome?.pid ?? null;
+  // pid 0 is the attached case (Chrome was already up, someone else owns it).
+  // Reporting 0 read as a fact; null says "not ours", which is what we know.
+  const chromePid = chrome && chrome.pid > 0 ? chrome.pid : null;
   const chromeRunning =
     cdpUp || (chromePid != null && isProcessAlive(chromePid));
   const selected = spaceManager.selected();
