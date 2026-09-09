@@ -55,6 +55,7 @@ export type EgoRuntimeDeps = {
   stuckAfterMs?: number;
   /** How long the liveness probe waits (default 400ms). */
   probeTimeoutMs?: number;
+  probesBeforeVerdict?: number;
   recheckProbeMs?: number;
   /** Ceiling on a single focus turn (default 8s). */
   turnMaxMs?: number;
@@ -664,6 +665,8 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
    */
   const ALIVE_FOR_MS = deps.stuckAfterMs ?? 0;
   const lastAlive = new Map<string, number>();
+  const missedProbes = new Map<string, number>();
+  const PROBES_BEFORE_VERDICT = deps.probesBeforeVerdict ?? 2;
   /** A live tab answers this in milliseconds; a wedged one never does. */
   const PROBE_TIMEOUT_MS = deps.probeTimeoutMs ?? 150;
   const RECHECK_PROBE_MS = deps.recheckProbeMs ?? 40;
@@ -701,12 +704,15 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
   }
 
   /** The single sentence every path uses for this one cause. */
-  function stuckTabMessage(targetId: string, method: string): string {
+  function stuckTabMessage(targetId: string): string {
     const space = deps.spaceManager.spaceIdForTarget(targetId) ?? "?";
+    // No CDP method name here on purpose: the verdict is about the tab, and
+    // which internal command happened to hit it first is not something the
+    // agent wrote or can act on. The host log keeps the method for operators.
     return (
       `ego-host: this tab's renderer is not responding (space=${space}, ` +
-      `tab=${targetId.slice(0, 8)}); it did not answer a liveness check ` +
-      `before ${method}. A page stuck in a long-running script answers ` +
+      `tab=${targetId.slice(0, 8)}); it did not answer a liveness check. ` +
+      `A page stuck in a long-running script answers ` +
       `nothing at all, so reading it another way — page.info(), a CSS query, ` +
       `a snapshot — hangs the same way. If the page is merely busy, wait and ` +
       `retry: the host re-checks the tab on every attempt and lets it through ` +
@@ -733,16 +739,24 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
     const budget = stuckTabs.has(targetId) ? RECHECK_PROBE_MS : PROBE_TIMEOUT_MS;
     if (await tabAnswers(targetId, budget)) {
       lastAlive.set(targetId, Date.now());
+      missedProbes.delete(targetId);
       clearTabStuck(targetId);
       return true;
     }
+    // One silent probe is not proof: a renderer busy serialising its own
+    // accessibility tree looks exactly like a dead one for as long as its main
+    // thread is blocked. Ask twice before condemning it — a frozen tab misses
+    // both, a busy one answers the second.
+    const missed = (missedProbes.get(targetId) ?? 0) + 1;
+    missedProbes.set(targetId, missed);
+    if (missed < PROBES_BEFORE_VERDICT && !stuckTabs.has(targetId)) return false;
     markTabStuck(targetId, method);
     return false;
   }
 
   function markTabStuck(targetId: string, method: string): void {
     if (stuckTabs.has(targetId)) return;
-    const why = stuckTabMessage(targetId, method);
+    const why = stuckTabMessage(targetId);
     stuckTabs.set(targetId, why);
     deps.log?.(
       `tab marked unresponsive: space=${
@@ -939,7 +953,7 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
       throw makeEgoError(
         "EGO_BROWSER_UNAVAILABLE",
         stuckTabs.get(snapshotTarget) ??
-          stuckTabMessage(snapshotTarget, "Accessibility.getFullAXTree"),
+          stuckTabMessage(snapshotTarget),
       );
     }
     // Activate and read in one turn: another client stealing focus midway is
@@ -1041,7 +1055,7 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
         ? deps.spaceManager.activeTargetForSelected()
         : null;
     if (pageTarget && !(await ensureTabAlive(pageTarget, method))) {
-      const why = stuckTabs.get(pageTarget) ?? stuckTabMessage(pageTarget, method);
+      const why = stuckTabs.get(pageTarget) ?? stuckTabMessage(pageTarget);
       if (msg && msg.id != null) {
         failRead({ originalId: msg.id, clientId: currentClientId() }, why);
       } else {
