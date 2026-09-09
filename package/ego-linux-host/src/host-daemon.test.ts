@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createServer as createHttpServer } from "node:http";
 import { createConnection } from "node:net";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
@@ -15,11 +15,7 @@ import type { CdpBridge } from "./cdp-bridge.js";
 import { SpaceManager } from "./space-manager.js";
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
-  const dir = join(
-    tmpdir(),
-    `ego-host-daemon-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-  );
-  await mkdir(dir, { recursive: true });
+  const dir = await mkdtemp(join(tmpdir(), "ego-host-daemon-"));
   try {
     return await fn(dir);
   } finally {

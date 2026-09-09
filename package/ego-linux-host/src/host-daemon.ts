@@ -105,7 +105,9 @@ export function createDaemonLog(dataDir: string): (line: string) => void {
   }
   return (line: string) => {
     try {
-      appendFileSync(logPath, `${new Date().toISOString()} ${line}\n`);
+      // ponytail: one line per event, so newlines in a value would forge one.
+      const safe = line.replace(/[\r\n]+/g, " ");
+      appendFileSync(logPath, `${new Date().toISOString()} ${safe}\n`);
     } catch {
       // Diagnostics must never take the host down.
     }

@@ -875,7 +875,7 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
       // No browser: still answer with the spaces and their counts.
     }
     const taskSpaces = spaces.map((space) => {
-      const { targetIds, ...rest } = space;
+      const { targetIds } = space;
       const live = targetIds.filter((id) => byTarget.has(id));
       const record: Record<string, unknown> = {
         ...publicSpace(space),
