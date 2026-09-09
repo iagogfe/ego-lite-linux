@@ -664,7 +664,7 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
   const ALIVE_FOR_MS = deps.stuckAfterMs ?? 250;
   const lastAlive = new Map<string, number>();
   /** A live tab answers this in milliseconds; a wedged one never does. */
-  const PROBE_TIMEOUT_MS = deps.probeTimeoutMs ?? 400;
+  const PROBE_TIMEOUT_MS = deps.probeTimeoutMs ?? 150;
   const stuckTabs = new Map<string, string>();
 
 
