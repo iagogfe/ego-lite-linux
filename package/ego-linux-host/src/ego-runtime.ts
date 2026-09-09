@@ -661,7 +661,7 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
    * short because the probe is cheap (1.2ms on a live tab, measured) and
    * stale confidence is what lets a freshly wedged tab cost a full timeout.
    */
-  const ALIVE_FOR_MS = deps.stuckAfterMs ?? 250;
+  const ALIVE_FOR_MS = deps.stuckAfterMs ?? 0;
   const lastAlive = new Map<string, number>();
   /** A live tab answers this in milliseconds; a wedged one never does. */
   const PROBE_TIMEOUT_MS = deps.probeTimeoutMs ?? 150;
