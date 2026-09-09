@@ -307,7 +307,11 @@ test("a second daemon on a live socket stands down instead of binding over it", 
       // Without the guard the second daemon binds and would hold the runner open.
       if (!(second instanceof Error)) await second.close();
 
-      assert.equal(stoodDown, true, "second daemon must detect the live socket");
+      assert.equal(
+        stoodDown,
+        true,
+        "second daemon must detect the live socket",
+      );
       assert.equal((second as Error).message, "stand down");
       // The live socket file must survive, and its owner must still answer.
       assert.equal(existsSync(config.hostSocket), true);
@@ -328,9 +332,7 @@ test("host.log records lifecycle events and no per-request traffic", async () =>
     await rpcCall(daemon.socketPath, "ego.createTaskSpace", { name: "work" });
     await daemon.close();
 
-    const lines = (await readFile(logPath, "utf8"))
-      .split("\n")
-      .filter(Boolean);
+    const lines = (await readFile(logPath, "utf8")).split("\n").filter(Boolean);
     assert.ok(
       lines.some((l) => l.includes("daemon listening")),
       "a restart must be explainable",

@@ -71,7 +71,6 @@ function makeFakeCdp(initial: CdpPageTarget[] = []): FakeCdp {
   return fake;
 }
 
-
 /** True while any of the promises is still unsettled. */
 async function pending(promises: Promise<unknown>[]): Promise<boolean> {
   const marker = Symbol("pending");
@@ -297,7 +296,11 @@ test("createTab gives the new tab the configured viewport", async () => {
   const fakeCdp = makeFakeCdp();
   const sent: any[] = [];
   const origSend = fakeCdp.send.bind(fakeCdp);
-  fakeCdp.send = async (method: string, params?: object, sessionId?: string) => {
+  fakeCdp.send = async (
+    method: string,
+    params?: object,
+    sessionId?: string,
+  ) => {
     sent.push({ method, params, sessionId });
     return origSend(method, params, sessionId);
   };
@@ -325,7 +328,11 @@ test("createTab leaves the viewport alone when none is configured", async () => 
   const { runtime, sm, fakeCdp } = setup();
   const sent: string[] = [];
   const origSend = fakeCdp.send.bind(fakeCdp);
-  fakeCdp.send = async (method: string, params?: object, sessionId?: string) => {
+  fakeCdp.send = async (
+    method: string,
+    params?: object,
+    sessionId?: string,
+  ) => {
     sent.push(method);
     return origSend(method, params, sessionId);
   };
@@ -364,7 +371,10 @@ test("creating a task space closes tabs abandoned by earlier agent sessions", as
   await runtime.handle("createTaskSpace", { name: "today" });
 
   assert.deepEqual(fakeCdp.closedTargets, ["old-agent-tab"]);
-  assert.equal(sm.list().some((s) => s.id === old.id), false);
+  assert.equal(
+    sm.list().some((s) => s.id === old.id),
+    false,
+  );
   assert.equal(sm.spaceIdForTarget("user-tab"), 1);
 });
 
@@ -408,7 +418,10 @@ test("concurrent snapshots take turns instead of stealing focus", async () => {
   let inFlight = 0;
   let overlapped = false;
   fakeCdp.send = async (method: string) => {
-    if (method === "Accessibility.queryAXTree" || method === "Accessibility.getFullAXTree") {
+    if (
+      method === "Accessibility.queryAXTree" ||
+      method === "Accessibility.getFullAXTree"
+    ) {
       if (++inFlight > 1) overlapped = true;
       order.push("start");
       await delay(20);
@@ -935,7 +948,10 @@ test("attachCdpForwarding pushes cdp.message events", async () => {
   fakeCdp.deliverMessage({ method: "Page.loadEventFired", params: {} });
   assert.equal(events.length, 1);
   assert.equal(events[0].event, "cdp.message");
-  assert.equal(JSON.parse(events[0].params.payload).method, "Page.loadEventFired");
+  assert.equal(
+    JSON.parse(events[0].params.payload).method,
+    "Page.loadEventFired",
+  );
 });
 
 test("harness CDP ids never collide with the daemon's own requests", async () => {
@@ -1235,8 +1251,14 @@ test("Target.activateTarget makes that tab active for listTabs and snapshot acro
 
   const { tabs } = await runtime.handle("listTabs", {});
   assert.deepEqual(
-    tabs.map((t: { targetId: string; active: boolean }) => [t.targetId, t.active]),
-    [[first, true], ["T2", false]],
+    tabs.map((t: { targetId: string; active: boolean }) => [
+      t.targetId,
+      t.active,
+    ]),
+    [
+      [first, true],
+      ["T2", false],
+    ],
   );
 
   // snapshot attaches to the same tab, not to the last one Chrome lists.

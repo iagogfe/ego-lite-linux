@@ -474,7 +474,10 @@ export class SpaceManager {
   activeTargetForSelected(): string | null {
     const space = this.selectedSpace();
     if (!space) return null;
-    if (space.activeTargetId && space.targetIds.includes(space.activeTargetId)) {
+    if (
+      space.activeTargetId &&
+      space.targetIds.includes(space.activeTargetId)
+    ) {
       return space.activeTargetId;
     }
     return space.targetIds[space.targetIds.length - 1] ?? null;
