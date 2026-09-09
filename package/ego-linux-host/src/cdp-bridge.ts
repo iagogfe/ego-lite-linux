@@ -5,7 +5,19 @@
  * Production uses connectCdp(port) against Chrome's /json/version endpoint.
  */
 
+import type WebSocket from "ws";
 import { makeEgoError } from "./errors.js";
+
+let wsModule: Promise<typeof import("ws")> | undefined;
+
+/** Start loading `ws` (~20ms of CJS) ahead of connectCdp, e.g. while Chrome boots. */
+export function preloadWs(): Promise<typeof import("ws")> {
+  if (!wsModule) {
+    wsModule = import("ws");
+    wsModule.catch(() => {});
+  }
+  return wsModule;
+}
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 
@@ -24,6 +36,8 @@ export type CdpBridge = {
    * Used by the daemon to forward raw messages to CLI `onCDPMessage`.
    */
   onMessage(handler: (msg: any) => void): () => void;
+  /** Transport still open (real WebSocket bridges only). */
+  isOpen?(): boolean;
   close(): Promise<void>;
   listPageTargets(): Promise<CdpPageTarget[]>;
   createTarget(url: string): Promise<string>;
@@ -292,26 +306,37 @@ function wrapSessionAsBridge(
 
 /**
  * Connect to Chrome CDP on loopback `port`.
- * GET /json/version → webSocketDebuggerUrl → WebSocket (Node 22 global).
+ * GET /json/version → webSocketDebuggerUrl → WebSocket (`ws` package).
+ * Pass `webSocketDebuggerUrl` when a probe already fetched it (skips a ~10ms
+ * Chrome HTTP round-trip on cold start).
+ *
+ * Not the Node global WebSocket (undici): it always negotiates
+ * permessage-deflate with Chrome and drops the connection (close 1006) on
+ * replies above ~4MB inflated, e.g. Accessibility.getFullAXTree on a large page.
  */
-export async function connectCdp(port: number): Promise<CdpBridge> {
-  let version: { webSocketDebuggerUrl?: string };
-  try {
-    const res = await fetch(`http://127.0.0.1:${port}/json/version`, {
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
+export async function connectCdp(
+  port: number,
+  webSocketDebuggerUrl?: string | null,
+): Promise<CdpBridge> {
+  let wsUrl = webSocketDebuggerUrl;
+  if (!wsUrl) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/json/version`, {
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      const version = (await res.json()) as { webSocketDebuggerUrl?: string };
+      wsUrl = version.webSocketDebuggerUrl;
+    } catch (err) {
+      throw makeEgoError(
+        "EGO_CDP_CHANNEL_UNAVAILABLE",
+        `CDP HTTP endpoint unavailable on 127.0.0.1:${port}: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
-    version = (await res.json()) as { webSocketDebuggerUrl?: string };
-  } catch (err) {
-    throw makeEgoError(
-      "EGO_CDP_CHANNEL_UNAVAILABLE",
-      `CDP HTTP endpoint unavailable on 127.0.0.1:${port}: ${err instanceof Error ? err.message : String(err)}`,
-    );
   }
 
-  const wsUrl = version.webSocketDebuggerUrl;
   if (!wsUrl || typeof wsUrl !== "string") {
     throw makeEgoError(
       "EGO_CDP_CHANNEL_UNAVAILABLE",
@@ -319,7 +344,9 @@ export async function connectCdp(port: number): Promise<CdpBridge> {
     );
   }
 
-  const ws = new WebSocket(wsUrl);
+  // Loopback CDP: compression buys nothing and is what breaks big messages.
+  const { default: WebSocketClient } = await preloadWs();
+  const ws = new WebSocketClient(wsUrl, { perMessageDeflate: false });
 
   await new Promise<void>((resolve, reject) => {
     const onOpen = () => {
@@ -357,7 +384,7 @@ export async function connectCdp(port: number): Promise<CdpBridge> {
 
   const transport: CdpTransport = {
     send(text: string) {
-      if (ws.readyState !== WebSocket.OPEN) {
+      if (ws.readyState !== WebSocketClient.OPEN) {
         throw new Error("WebSocket is not open");
       }
       ws.send(text);
@@ -375,11 +402,11 @@ export async function connectCdp(port: number): Promise<CdpBridge> {
     );
   });
 
-  return wrapSessionAsBridge(session, async () => {
+  const bridge = wrapSessionAsBridge(session, async () => {
     messageHandlers.clear();
     if (
-      ws.readyState === WebSocket.OPEN ||
-      ws.readyState === WebSocket.CONNECTING
+      ws.readyState === WebSocketClient.OPEN ||
+      ws.readyState === WebSocketClient.CONNECTING
     ) {
       await new Promise<void>((resolve) => {
         const done = () => resolve();
@@ -395,4 +422,6 @@ export async function connectCdp(port: number): Promise<CdpBridge> {
       });
     }
   });
+  bridge.isOpen = () => ws.readyState === WebSocketClient.OPEN;
+  return bridge;
 }

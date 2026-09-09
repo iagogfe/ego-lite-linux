@@ -8,7 +8,7 @@ This is **not** the Citro/macOS ego app. It is an OSS-friendly host that approxi
 
 ## Status
 
-MVP host: daemon, CDP bridge, Task Spaces, CLI shim, doctor diagnostics, stale-socket recovery, and Chrome respawn on next ensure.
+MVP host: daemon, CDP bridge, Task Spaces, CLI shim, doctor diagnostics, stale-socket recovery, and Chrome respawn on next ensure. Agent navigation reuses an existing same-origin tab before creating another one. Startup reconciliation drops persisted references to closed tabs and keeps user-owned tabs outside agent spaces.
 
 **MVP acceptance (2026-07-23):** manual checklist PASS on Linux headed Chrome — `ego-browser` on PATH, `--doctor` healthy, example.com smoke (title + snapshot), user-tab isolation, two-space disjoint tabs, space reuse by name, handoff → `EGO_TASK_SPACE_USER_IN_CONTROL` → `takeOver` recovery, `package/ego-browser` and `package/ego-linux-host` unit tests green.
 

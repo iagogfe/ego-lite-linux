@@ -3,6 +3,7 @@ import { accessSync, constants } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { connect as netConnect } from "node:net";
 import type { HostConfig } from "./config.js";
 import { makeEgoError } from "./errors.js";
 
@@ -24,10 +25,21 @@ export type ResolveChromePathOptions = {
 export type EnsureChromeOptions = {
   /** Passed through to resolveChromePath for test isolation. */
   candidates?: readonly string[];
+  /** Called right after Chrome is spawned; work here overlaps Chrome's boot. */
+  onSpawn?: () => void;
 };
 
+/**
+ * Viewport every agent tab starts with, in CSS pixels. A desktop-shaped
+ * viewport is what makes a site render the controls a person would see;
+ * `page.setViewportSize` overrides it per round.
+ */
+export const AGENT_VIEWPORT = { width: 1280, height: 900 } as const;
+
 const CDP_READY_TIMEOUT_MS = 15_000;
-const CDP_POLL_MS = 100;
+// Polling a closed loopback port is a fast ECONNREFUSED; 100ms wasted up to
+// 100ms after Chrome was already listening.
+const CDP_POLL_MS = 20;
 
 export type ChromeHandle = {
   pid: number;
@@ -35,6 +47,8 @@ export type ChromeHandle = {
   userDataDir: string;
   /** Binary actually in use; null when we attached to a Chrome we did not spawn. */
   path: string | null;
+  /** From the /json/version probe that saw CDP up; saves connectCdp a ~10ms round-trip. */
+  webSocketDebuggerUrl?: string | null;
   kill(): Promise<void>;
 };
 
@@ -90,16 +104,38 @@ export function resolveChromePath(
   return null;
 }
 
-/** True when CDP HTTP endpoint answers on 127.0.0.1:port. */
-export async function isCdpUp(port: number): Promise<boolean> {
+type CdpVersion = { webSocketDebuggerUrl?: string };
+
+/** GET /json/version on 127.0.0.1:port; null when CDP does not answer. */
+async function cdpVersion(port: number): Promise<CdpVersion | null> {
+  let res: Response;
   try {
-    const res = await fetch(`http://127.0.0.1:${port}/json/version`, {
+    res = await fetch(`http://127.0.0.1:${port}/json/version`, {
       signal: AbortSignal.timeout(1000),
     });
-    return res.ok;
   } catch {
-    return false;
+    return null;
   }
+  if (!res.ok) return null;
+  // A 200 means CDP is up even when the body is not JSON (test probes).
+  return res.json().catch(() => ({})) as Promise<CdpVersion>;
+}
+
+/** True when CDP HTTP endpoint answers on 127.0.0.1:port. */
+export async function isCdpUp(port: number): Promise<boolean> {
+  return (await cdpVersion(port)) !== null;
+}
+
+/** True when something accepts TCP on 127.0.0.1:port (~0.5ms when refused). */
+function isPortOpen(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const sock = netConnect({ host: "127.0.0.1", port });
+    sock.once("connect", () => {
+      sock.destroy();
+      resolve(true);
+    });
+    sock.once("error", () => resolve(false));
+  });
 }
 
 function hasDisplayEnv(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -142,6 +178,7 @@ function makeHandle(
   cdpPort: number,
   userDataDir: string,
   path: string | null,
+  webSocketDebuggerUrl: string | null,
   child?: ChildProcess,
 ): ChromeHandle {
   let killed = false;
@@ -150,6 +187,7 @@ function makeHandle(
     cdpPort,
     userDataDir,
     path,
+    webSocketDebuggerUrl,
     async kill() {
       if (killed) return;
       killed = true;
@@ -174,9 +212,21 @@ export async function ensureChrome(
   config: HostConfig,
   options?: EnsureChromeOptions,
 ): Promise<ChromeHandle> {
-  if (await isCdpUp(config.cdpPort)) {
+  // The first fetch() in a process pays ~30ms of HTTP-stack setup. A TCP probe
+  // skips that when nothing listens, so Chrome spawns ~25ms sooner; the fetch
+  // poll below then pays the setup while Chrome is still booting.
+  const existing = (await isPortOpen(config.cdpPort))
+    ? await cdpVersion(config.cdpPort)
+    : null;
+  if (existing) {
     // Attached mode: we did not spawn; pid unknown (0). kill is best-effort no-op on 0.
-    return makeHandle(0, config.cdpPort, config.userDataDir, null);
+    return makeHandle(
+      0,
+      config.cdpPort,
+      config.userDataDir,
+      null,
+      existing.webSocketDebuggerUrl ?? null,
+    );
   }
 
   const chromePath = resolveChromePath(process.env, config.chromePath, {
@@ -207,7 +257,20 @@ export async function ensureChrome(
     "--no-default-browser-check",
   ];
   if (config.headless) {
-    args.push("--headless=new");
+    // Headless is agent-only: the profile's extensions cost ~100ms per
+    // navigation and slow Target.getTargets; headed keeps them for the user.
+    // The default 780x437 viewport renders sites in their narrow layout, where
+    // controls a real user would see (wikipedia's search box) collapse to 0x0
+    // and vanish from the AX tree. --window-size sizes the *window*: Chrome
+    // subtracts its own UI, so the viewport lands short (900 → 757 here, and
+    // the deduction varies). The window is only a sane upper bound; the exact
+    // viewport comes from AGENT_VIEWPORT on each agent tab. Headed keeps the
+    // user's own window.
+    args.push(
+      "--headless=new",
+      "--disable-extensions",
+      `--window-size=${AGENT_VIEWPORT.width},${AGENT_VIEWPORT.height + 160}`,
+    );
   }
 
   const child = spawn(chromePath, args, {
@@ -218,6 +281,7 @@ export async function ensureChrome(
 
   // Own process group so kill(-pid) tears down Chrome helpers.
   child.unref();
+  options?.onSpawn?.();
 
   if (child.pid === undefined) {
     throw makeEgoError(
@@ -232,6 +296,7 @@ export async function ensureChrome(
     config.cdpPort,
     config.userDataDir,
     chromePath,
+    null,
     child,
   );
 
@@ -243,7 +308,9 @@ export async function ensureChrome(
         `Chrome exited before CDP became ready (code=${child.exitCode}, signal=${child.signalCode})`,
       );
     }
-    if (await isCdpUp(config.cdpPort)) {
+    const version = await cdpVersion(config.cdpPort);
+    if (version) {
+      handle.webSocketDebuggerUrl = version.webSocketDebuggerUrl ?? null;
       return handle;
     }
     await sleep(CDP_POLL_MS);

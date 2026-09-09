@@ -15,6 +15,8 @@ export type HostConfig = {
   headless: boolean;
   hostSocket: string;
   dataDir: string;
+  /** Idle time before an agent task space's tabs are closed (ms). */
+  agentSpaceTtlMs?: number;
 };
 
 /** Optional fields from ~/.config/ego-lite/config.json */
@@ -105,6 +107,8 @@ export async function loadConfig(
     hostSocket = defaultSocketPath(env);
   }
 
+  const ttlRaw = Number(env.EGO_AGENT_SPACE_TTL_MS);
+
   return {
     chromePath,
     userDataDir,
@@ -112,5 +116,8 @@ export async function loadConfig(
     headless,
     hostSocket,
     dataDir,
+    ...(Number.isFinite(ttlRaw) && env.EGO_AGENT_SPACE_TTL_MS
+      ? { agentSpaceTtlMs: ttlRaw }
+      : {}),
   };
 }

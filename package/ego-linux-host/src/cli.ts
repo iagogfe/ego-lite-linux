@@ -6,7 +6,7 @@
 
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { open, mkdir, unlink } from "node:fs/promises";
+import { open, mkdir, stat, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -17,6 +17,7 @@ import {
   pingSocket,
   type HostConnection,
 } from "./ego-client.js";
+import { makeEgoError } from "./errors.js";
 
 const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -50,7 +51,11 @@ export type RunCliOptions = {
   /** Override host ensure (tests). */
   ensureHost?: (
     config: HostConfig,
-    options?: { env?: NodeJS.ProcessEnv; packageRoot?: string },
+    options?: {
+      env?: NodeJS.ProcessEnv;
+      packageRoot?: string;
+      onSpawn?: () => void;
+    },
   ) => Promise<void>;
   /** Override host connection (tests). */
   connectHost?: (socketPath: string) => Promise<HostConnection>;
@@ -164,14 +169,71 @@ export async function ensureHost(
     packageRoot?: string;
     timeoutMs?: number;
     pollMs?: number;
+    /** Called right after the daemon is spawned, before polling starts. */
+    onSpawn?: () => void;
   } = {},
 ): Promise<void> {
   const env = options.env ?? process.env;
   if (await pingSocket(config.hostSocket)) return;
 
-  // Stale socket recovery: file exists but daemon is not answering → unlink + restart.
-  await unlinkStaleSocket(config.hostSocket);
+  // Fan-out is the normal case for an agent: 20 clients finding no daemon used
+  // to spawn 20 of them, 19 of which start Node, lose the bind and exit. The
+  // first to create the lock file spawns; the rest just wait for the socket.
+  const lockPath = `${config.hostSocket}.lock`;
+  const timeoutMs = options.timeoutMs ?? 15_000;
+  const pollMs = options.pollMs ?? 10;
+  if (!(await acquireStartLock(lockPath))) {
+    const deadline = Date.now() + Math.min(timeoutMs, 10_000);
+    while (Date.now() < deadline) {
+      if (await pingSocket(config.hostSocket)) return;
+      await sleep(pollMs);
+    }
+    // The lock holder never delivered (crashed before listening): clear the
+    // lock so this client can take over instead of waiting forever.
+    await unlink(lockPath).catch(() => {});
+  }
 
+  try {
+    // Stale socket recovery: file exists but daemon is not answering → unlink + restart.
+    await unlinkStaleSocket(config.hostSocket);
+    await spawnDaemon(config, env, options, timeoutMs, pollMs);
+  } finally {
+    await unlink(lockPath).catch(() => {});
+  }
+}
+
+/**
+ * Create the lock file exclusively. A lock older than 30s is treated as
+ * abandoned (the holder died) and taken over.
+ */
+async function acquireStartLock(lockPath: string): Promise<boolean> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fh = await open(lockPath, "wx");
+      await fh.close();
+      return true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") return false;
+      let age = 0;
+      try {
+        age = Date.now() - (await stat(lockPath)).mtimeMs;
+      } catch {
+        continue; // vanished between open and stat: try to claim it again
+      }
+      if (age < 30_000) return false;
+      await unlink(lockPath).catch(() => {});
+    }
+  }
+  return false;
+}
+
+async function spawnDaemon(
+  config: HostConfig,
+  env: NodeJS.ProcessEnv,
+  options: { packageRoot?: string; onSpawn?: () => void },
+  timeoutMs: number,
+  pollMs: number,
+): Promise<void> {
   const packageRoot = options.packageRoot ?? PACKAGE_ROOT;
   const daemonScript = join(packageRoot, "bin", "ego-linux-hostd.mjs");
   if (!existsSync(daemonScript)) {
@@ -198,11 +260,10 @@ export async function ensureHost(
     env: childEnv,
   });
   child.unref();
+  options.onSpawn?.();
   // Parent no longer needs the fd; child has inherited it.
   await logFh.close().catch(() => {});
 
-  const timeoutMs = options.timeoutMs ?? 15_000;
-  const pollMs = options.pollMs ?? 200;
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await pingSocket(config.hostSocket)) return;
@@ -222,9 +283,58 @@ function writeStream(
 }
 
 /**
+ * Connect to the host, retrying while the socket is missing or refusing.
+ * A daemon that lost the startup race unlinks nothing, but the winner can
+ * still be a moment from listening — and a raw ENOENT here used to reach the
+ * user as a Node stack trace instead of an ego-browser message.
+ */
+export async function connectWithRetry(
+  connect: (socketPath: string) => Promise<HostConnection>,
+  socketPath: string,
+  timeoutMs = 3000,
+): Promise<HostConnection> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      return await connect(socketPath);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      const retryable =
+        code === "ENOENT" || code === "ECONNREFUSED" || code === "EAGAIN";
+      if (!retryable || Date.now() >= deadline) {
+        throw makeEgoError(
+          "EGO_TASK_HOST_DISCONNECTED",
+          `cannot reach ego-linux-hostd on ${socketPath}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+      await sleep(20);
+    }
+  }
+}
+
+/**
  * CLI entry: flags, ensure host, install ego, run harness runMain.
  */
 export async function runCli(
+  argv: string[],
+  opts: RunCliOptions = {},
+): Promise<number> {
+  try {
+    return await runCliInner(argv, opts);
+  } catch (err) {
+    // The bin awaits this at top level: an escaping error would reach the user
+    // as a Node stack trace instead of the "ego-browser: ..." contract.
+    writeStream(
+      opts.stderr ?? process.stderr,
+      `ego-browser: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+    return 1;
+  }
+}
+
+async function runCliInner(
   argv: string[],
   opts: RunCliOptions = {},
 ): Promise<number> {
@@ -262,7 +372,7 @@ export async function runCli(
     } catch {
       harnessPath = null;
     }
-    const conn = await connect(config.hostSocket);
+    const conn = await connectWithRetry(connect, config.hostSocket);
     try {
       const doctor = (await conn.request("doctor")) as Record<string, unknown>;
       writeStream(
@@ -277,7 +387,7 @@ export async function runCli(
 
   if (flags.reload) {
     await ensure(config, { env, packageRoot });
-    const conn = await connect(config.hostSocket);
+    const conn = await connectWithRetry(connect, config.hostSocket);
     try {
       await conn.request("reload", { config });
       writeStream(stdout, "browser connection reset on next call\n");
@@ -287,15 +397,10 @@ export async function runCli(
     }
   }
 
-  await ensure(config, { env, packageRoot });
-  const conn = await connect(config.hostSocket);
-  installEgoClient(conn);
-
   let harnessPath: string;
   try {
     harnessPath = resolveHarnessPath(env, packageRoot, opts.harnessPath);
   } catch (err) {
-    conn.close();
     writeStream(
       stderr,
       (err instanceof Error ? err.message : String(err)) + "\n",
@@ -303,8 +408,23 @@ export async function runCli(
     return 1;
   }
 
+  // Import the harness while the daemon (and Chrome) come up. The import's
+  // synchronous linking (~20ms) is deferred until after the spawn so it does
+  // not delay the daemon; the module does not touch globalThis.ego on import.
+  const harnessUrl = pathToFileURL(harnessPath).href;
+  let harness: Promise<any> | undefined;
+  const loadHarness = () => {
+    harness ??= import(harnessUrl);
+    harness.catch(() => {});
+    return harness;
+  };
+
+  await ensure(config, { env, packageRoot, onSpawn: loadHarness });
+  const conn = await connectWithRetry(connect, config.hostSocket);
+  installEgoClient(conn);
+
   try {
-    const mod = await import(pathToFileURL(harnessPath).href);
+    const mod = await loadHarness();
     const runMain = mod.runMain;
     if (typeof runMain !== "function") {
       writeStream(

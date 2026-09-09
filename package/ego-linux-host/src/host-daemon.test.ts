@@ -2,22 +2,20 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer as createHttpServer } from "node:http";
 import { createConnection } from "node:net";
-import { mkdir, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
-import { startDaemon, HOST_VERSION } from "./host-daemon.js";
+import { createDaemonLog, startDaemon, HOST_VERSION } from "./host-daemon.js";
+import { connectHost } from "./ego-client.js";
 import { decodeLine, encodeLine, isRpcResponse, LineBuffer } from "./rpc.js";
 import type { HostConfig } from "./config.js";
 import type { CdpBridge } from "./cdp-bridge.js";
 import { SpaceManager } from "./space-manager.js";
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
-  const dir = join(
-    tmpdir(),
-    `ego-host-daemon-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-  );
-  await mkdir(dir, { recursive: true });
+  const dir = await mkdtemp(join(tmpdir(), "ego-host-daemon-"));
   try {
     return await fn(dir);
   } finally {
@@ -282,6 +280,319 @@ test("daemon rejects unknown methods", async () => {
       );
     } finally {
       await daemon.close();
+    }
+  });
+});
+
+test("a second daemon on a live socket stands down instead of binding over it", async () => {
+  await withTempDir(async (dir) => {
+    const config = testConfig(dir);
+    const first = await startDaemon({ config, skipChrome: true });
+    let stoodDown = false;
+    try {
+      const second = await startDaemon({
+        config: { ...config },
+        skipChrome: true,
+        writePid: false,
+        onAlreadyRunning: () => {
+          stoodDown = true;
+          // Stand in for process.exit(0) so the test runner survives.
+          throw new Error("stand down");
+        },
+      }).catch((err) => err as Error);
+      // Without the guard the second daemon binds and would hold the runner open.
+      if (!(second instanceof Error)) await second.close();
+
+      assert.equal(
+        stoodDown,
+        true,
+        "second daemon must detect the live socket",
+      );
+      assert.equal((second as Error).message, "stand down");
+      // The live socket file must survive, and its owner must still answer.
+      assert.equal(existsSync(config.hostSocket), true);
+      const ping = await rpcCall(first.socketPath, "ping");
+      assert.equal(ping.ok, true);
+    } finally {
+      await first.close();
+    }
+  });
+});
+
+test("host.log records lifecycle events and no per-request traffic", async () => {
+  await withTempDir(async (dir) => {
+    const config = testConfig(dir);
+    const logPath = join(dir, "host.log");
+    const daemon = await startDaemon({ config, skipChrome: true });
+    await rpcCall(daemon.socketPath, "ego.listTaskSpaces");
+    await rpcCall(daemon.socketPath, "ego.createTaskSpace", { name: "work" });
+    await daemon.close();
+
+    const lines = (await readFile(logPath, "utf8")).split("\n").filter(Boolean);
+    assert.ok(
+      lines.some((l) => l.includes("daemon listening")),
+      "a restart must be explainable",
+    );
+    assert.ok(lines.some((l) => l.includes("daemon stopping")));
+    // Every line carries a timestamp, and none names an RPC method.
+    for (const line of lines) {
+      assert.match(line, /^\d{4}-\d{2}-\d{2}T[\d:.]+Z /);
+      assert.equal(
+        line.includes("ego."),
+        false,
+        `traffic leaked into the log: ${line}`,
+      );
+    }
+    assert.ok(lines.length <= 4, `log is chatty: ${lines.length} lines`);
+  });
+});
+
+test("createDaemonLog truncates a log that grew past the cap", async () => {
+  await withTempDir(async (dir) => {
+    const logPath = join(dir, "host.log");
+    await writeFile(logPath, "x".repeat(1_000_001), "utf8");
+
+    const log = createDaemonLog(dir);
+    log("after rotation");
+
+    const written = await readFile(logPath, "utf8");
+    assert.ok(written.endsWith("after rotation\n"));
+    assert.ok(written.length < 200, "old content must be gone");
+  });
+});
+
+test("a slow ego call on one session does not block another session", async () => {
+  await withTempDir(async (dir) => {
+    const config = testConfig(dir);
+    const slow = deferred();
+    const daemon = await startDaemon({
+      config,
+      connectCdp: async () => ({
+        ...fakeCdp(),
+        isOpen: () => true,
+        async send(method: string) {
+          // The heavy call of one session (a big page's AX tree) hangs.
+          if (method === "Accessibility.getFullAXTree") {
+            await slow.promise;
+            return { nodes: [] };
+          }
+          return {};
+        },
+        async listPageTargets() {
+          return [
+            {
+              targetId: "t-slow",
+              title: "slow",
+              url: "https://slow.test",
+              type: "page",
+            },
+          ];
+        },
+      }),
+      ensureChrome: async () => ({
+        pid: 0,
+        cdpPort: config.cdpPort,
+        userDataDir: config.userDataDir,
+        path: null,
+        async kill() {},
+      }),
+    });
+    const space = daemon.spaceManager.createAgentSpace("slow-space");
+    daemon.spaceManager.assignTarget("t-slow", space.id);
+
+    const c1 = await connectHost(daemon.socketPath);
+    const c2 = await connectHost(daemon.socketPath);
+    try {
+      await c1.request("ego.useTaskSpace", { id: space.id });
+      const hanging = c1.request("ego.snapshot", {});
+      let hangingSettled = false;
+      void hanging.then(
+        () => (hangingSettled = true),
+        () => (hangingSettled = true),
+      );
+      await delay(50);
+
+      // The second client must be served while the first is still stuck.
+      // Raced against a deadline: serialized, this request never answers.
+      const spaces = await Promise.race([
+        c2.request("ego.listTaskSpaces"),
+        delay(2000).then(() => "blocked" as const),
+      ]);
+      assert.notEqual(
+        spaces,
+        "blocked",
+        "a second session was blocked behind the slow one",
+      );
+      assert.ok(Array.isArray(spaces.taskSpaces));
+      assert.equal(
+        hangingSettled,
+        false,
+        "the slow call should still be in flight",
+      );
+
+      slow.resolve();
+      await hanging.catch(() => undefined);
+    } finally {
+      c1.close();
+      c2.close();
+      await daemon.close();
+    }
+  });
+});
+
+test("a disconnecting client does not keep the focus lease", async () => {
+  await withTempDir(async (dir) => {
+    const config = testConfig(dir);
+    const daemon = await startDaemon({
+      config,
+      connectCdp: async () => ({
+        ...fakeCdp(),
+        isOpen: () => true,
+        async send(method: string) {
+          return method === "Accessibility.getFullAXTree" ? { nodes: [] } : {};
+        },
+        async listPageTargets() {
+          return [
+            {
+              targetId: "t-leave",
+              title: "t",
+              url: "https://x.test",
+              type: "page",
+            },
+          ];
+        },
+      }),
+      ensureChrome: async () => ({
+        pid: 0,
+        cdpPort: config.cdpPort,
+        userDataDir: config.userDataDir,
+        path: null,
+        async kill() {},
+      }),
+    });
+    const space = daemon.spaceManager.createAgentSpace("leaver-space");
+    daemon.spaceManager.assignTarget("t-leave", space.id);
+    try {
+      // A client takes the focus lease with an AX read, then its process exits.
+      const leaver = await connectHost(daemon.socketPath);
+      await leaver.request("ego.useTaskSpace", { id: space.id });
+      await leaver.request("ego.sendCDPMessage", {
+        payload: JSON.stringify({
+          id: 3,
+          method: "Accessibility.getFullAXTree",
+        }),
+      });
+      leaver.close();
+      await delay(50);
+
+      // The next client must be served without waiting out the lease deadline.
+      const next = await connectHost(daemon.socketPath);
+      try {
+        await next.request("ego.useTaskSpace", { id: space.id });
+        const t = Date.now();
+        const served = await Promise.race([
+          next.request("ego.snapshot", {}),
+          delay(1500).then(() => "stuck" as const),
+        ]);
+        assert.notEqual(served, "stuck", "lease stayed with a gone client");
+        assert.ok(Date.now() - t < 1000);
+      } finally {
+        next.close();
+      }
+    } finally {
+      await daemon.close();
+    }
+  });
+});
+
+test("concurrent connections keep their own task space selection", async () => {
+  await withTempDir(async (dir) => {
+    const config = testConfig(dir);
+    let created = 0;
+    const daemon = await startDaemon({
+      config,
+      connectCdp: async () => ({
+        ...fakeCdp(),
+        isOpen: () => true,
+        async createTarget() {
+          return `target-${++created}`;
+        },
+      }),
+      ensureChrome: async () => ({
+        pid: 0,
+        cdpPort: config.cdpPort,
+        userDataDir: config.userDataDir,
+        path: null,
+        async kill() {},
+      }),
+    });
+    daemon.spaceManager.createAgentSpace("p1");
+    daemon.spaceManager.createAgentSpace("p2");
+    const [p1, p2] = daemon.spaceManager
+      .list()
+      .filter((s) => s.name === "p1" || s.name === "p2");
+    // Two live connections, the way two ego-browser processes look to the host.
+    const c1 = await connectHost(daemon.socketPath);
+    const c2 = await connectHost(daemon.socketPath);
+    try {
+      // Interleaved exactly like the race: both select, then both create a tab.
+      await c1.request("ego.useTaskSpace", { id: p1.id });
+      await c2.request("ego.useTaskSpace", { id: p2.id });
+      const t1 = await c1.request("ego.createTab", { url: "https://a.test/" });
+      const t2 = await c2.request("ego.createTab", { url: "https://b.test/" });
+
+      const spaces = daemon.spaceManager.list();
+      assert.deepEqual(
+        spaces.find((s) => s.id === p1.id)?.targetIds,
+        [t1.targetId],
+        "connection 1's tab must stay in the space connection 1 selected",
+      );
+      assert.deepEqual(spaces.find((s) => s.id === p2.id)?.targetIds, [
+        t2.targetId,
+      ]);
+    } finally {
+      c1.close();
+      c2.close();
+      await daemon.close();
+    }
+  });
+});
+
+test("daemon reconnects the CDP bridge when its websocket closed while Chrome stayed up", async () => {
+  await withTempDir(async (dir) => {
+    const config = testConfig(dir);
+    const probe = await startCdpProbe();
+    config.cdpPort = probe.port;
+    let connectCount = 0;
+    let firstBridgeOpen = true;
+    const daemon = await startDaemon({
+      config,
+      ensureChrome: async () => ({
+        pid: 0,
+        cdpPort: config.cdpPort,
+        userDataDir: config.userDataDir,
+        path: null,
+        async kill() {},
+      }),
+      connectCdp: async () => {
+        const n = ++connectCount;
+        return { ...fakeCdp(), isOpen: () => n > 1 || firstBridgeOpen };
+      },
+    });
+    try {
+      assert.equal(connectCount, 1);
+      // e.g. an oversized CDP reply dropped the websocket; CDP itself still answers.
+      firstBridgeOpen = false;
+      const tabs = await rpcCall(daemon.socketPath, "ego.listTabs");
+      assert.ok(Array.isArray(tabs.tabs));
+      assert.equal(
+        connectCount,
+        2,
+        "closed bridge must be replaced instead of reused",
+      );
+    } finally {
+      await daemon.close();
+      await probe.close();
     }
   });
 });

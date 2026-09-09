@@ -12,7 +12,15 @@ export type RpcResponse = {
   result?: any;
   error?: { code: string; message: string };
 };
-export type RpcEvent = { event: string; params?: any };
+export type RpcEvent = {
+  /**
+   * Deliver only to this connection (daemon-internal, stripped before the
+   * wire). CDP responses belong to the client that sent the request.
+   */
+  to?: string;
+  event: string;
+  params?: any;
+};
 export type RpcMessage = RpcRequest | RpcResponse | RpcEvent;
 
 /** Encode a message as one NDJSON line (includes trailing newline). */
