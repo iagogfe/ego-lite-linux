@@ -3,7 +3,6 @@ import { browserCdp } from "../browser-runtime.js";
 import { withHandle, resolveAndCall } from "./element-ops.js";
 import { waitForSelector } from "./waits.js";
 import { state } from "../state.js";
-import { describeSelector } from "../locator-query.js";
 import { noMatchMessage } from "../element-resolver.js";
 
 type FillOptions = {

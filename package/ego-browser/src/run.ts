@@ -184,9 +184,11 @@ function syntaxErrorWithLine(code: string, error: unknown): Error {
   const message = error instanceof Error ? error.message : String(error);
   // Trailing blank lines (a heredoc always ends with one) are not where the
   // agent's unclosed bracket is.
-  const lines = Math.max(1, code.replace(/\s+$/, "").split("\n").length);
+  const lines = Math.max(1, code.trimEnd().split("\n").length);
   let reported: number | undefined;
   try {
+    // Compile only, never run: this recovers V8's line number for a syntax
+    // error in the agent's own script, which runMain is about to execute anyway.
     // eslint-disable-next-line no-new
     new Script(`(async () => {\n${code}\n})()`, {
       filename: "<anonymous_script>",
