@@ -488,6 +488,15 @@ export class SpaceManager {
     return space ? [...space.targetIds] : [];
   }
 
+  /** Drop one closed tab from whatever space held it. */
+  forgetTarget(targetId: string): void {
+    for (const space of this.spaces) {
+      const idx = space.targetIds.indexOf(targetId);
+      if (idx !== -1) space.targetIds.splice(idx, 1);
+      if (space.activeTargetId === targetId) delete space.activeTargetId;
+    }
+  }
+
   /** Remove persisted memberships for targets that no longer exist in Chrome. */
   reconcileTargets(targetIds: Iterable<string>): void {
     const live = new Set(targetIds);

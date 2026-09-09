@@ -627,47 +627,145 @@ test("focusing a tab waits its turn instead of cutting a read short", async () =
   await activate;
 });
 
-test("a read whose tab stays stuck is failed instead of re-queued forever", async () => {
+test("an unresponsive tab is diagnosed once and every path gets that answer", async () => {
   const sm = new SpaceManager();
   const fakeCdp = makeFakeCdp();
+  // A renderer that answers nothing — including the host's liveness probe.
+  fakeCdp.send = async (method: string) => {
+    if (method.startsWith("Accessibility.") || method === "Page.getFrameTree") {
+      await delay(10_000);
+    }
+    return {};
+  };
+  const events: any[] = [];
   const runtime = createEgoRuntime({
     spaceManager: sm,
     getCdp: () => fakeCdp,
     ensureSession: async () => "sess-1",
-    focusMaxMs: 40,
+    stuckAfterMs: 40,
+    probeTimeoutMs: 20,
   });
-  const events: any[] = [];
   runtime.onEvent((ev) => events.push(ev));
   runtime.attachCdpForwarding();
-  const stuck = sm.createAgentSpace("stuck");
-  sm.assignTarget("t-stuck", stuck.id);
-  const other = sm.createAgentSpace("other");
-  sm.assignTarget("t-other", other.id);
+  const space = sm.createAgentSpace("frozen");
+  sm.assignTarget("t-frozen", space.id);
+  sm.use(space.id);
 
-  // A tab that never answers: the reply for this id never arrives.
-  await sm.runForClient("stuck-client", () => {
-    sm.use(stuck.id);
-    return runtime.handle("sendCDPMessage", {
-      payload: JSON.stringify({ id: 9, method: "Accessibility.getFullAXTree" }),
-    });
+  // First page command: the watchdog fires and the tab is marked.
+  await runtime.handle("sendCDPMessage", {
+    payload: JSON.stringify({ id: 1, method: "Accessibility.getFullAXTree" }),
   });
-  // Someone waiting is what makes the deadline hand the turn over.
-  const waiter = sm.runForClient("waiter", () => {
-    sm.use(other.id);
-    return runtime.handle("snapshot", {});
-  });
-  await delay(250);
+  await delay(120);
 
-  // Preempted twice, the client is answered with an error rather than left
-  // waiting out its own 30s CDP timeout while holding a turn every 40ms.
-  const failure = events.find((ev) => {
-    if (ev.event !== "cdp.message") return false;
-    const msg = JSON.parse(ev.params.payload);
-    return msg.id === 9 && msg.error;
+  const failure = events
+    .filter((ev) => ev.event === "cdp.message")
+    .map((ev) => JSON.parse(ev.params.payload))
+    .find((m) => m.id === 1 && m.error);
+  assert.ok(failure, "the pending command was never answered");
+  assert.match(failure.error.message, /renderer is not responding/);
+
+  // Every later path gets the same answer, immediately.
+  const started = Date.now();
+  await runtime.handle("sendCDPMessage", {
+    payload: JSON.stringify({ id: 2, method: "DOM.getDocument" }),
   });
-  assert.ok(failure, "the stuck read was never answered");
-  assert.match(failure.params.payload, /renderer looks stuck/);
-  await waiter;
+  const second = events
+    .filter((ev) => ev.event === "cdp.message")
+    .map((ev) => JSON.parse(ev.params.payload))
+    .find((m) => m.id === 2 && m.error);
+  assert.ok(second, "a later command was not short-circuited");
+  assert.equal(second.error.message, failure.error.message, "one cause, one message");
+
+  await assert.rejects(
+    () => runtime.handle("snapshot", {}),
+    (err: any) => /renderer is not responding/.test(err.message),
+    "snapshot must give the same diagnosis, not a generic timeout",
+  );
+  assert.ok(Date.now() - started < 400, "the client waited instead of learning");
+});
+
+test("the verdict lifts by itself once the tab answers again", async () => {
+  const sm = new SpaceManager();
+  const fakeCdp = makeFakeCdp();
+  let wedged = true;
+  fakeCdp.send = async (method: string) => {
+    // While wedged the renderer answers nothing, probe included.
+    if (wedged && (method.startsWith("Accessibility.") || method === "Page.getFrameTree")) {
+      await delay(10_000);
+    }
+    if (method === "Accessibility.getFullAXTree") return { nodes: [] };
+    return {};
+  };
+  const runtime = createEgoRuntime({
+    spaceManager: sm,
+    getCdp: () => fakeCdp,
+    ensureSession: async () => "sess-1",
+    stuckAfterMs: 40,
+    probeTimeoutMs: 20,
+  });
+  runtime.attachCdpForwarding();
+  const space = sm.createAgentSpace("recovers");
+  sm.assignTarget("t-recovers", space.id);
+  sm.use(space.id);
+
+  await runtime.handle("sendCDPMessage", {
+    payload: JSON.stringify({ id: 1, method: "Accessibility.getFullAXTree" }),
+  });
+  await delay(120);
+  await assert.rejects(
+    () => runtime.handle("snapshot", {}),
+    (err: any) => /renderer is not responding/.test(err.message),
+    "the tab should be marked while it is wedged",
+  );
+
+  // The page finishes its long task and starts answering again. Nothing is
+  // closed, no new process: the next attempt must simply work.
+  wedged = false;
+
+  const result = await runtime.handle("snapshot", {});
+  assert.ok(result, "a recovered tab stayed blocked — the verdict never lifts");
+});
+
+test("closing an unresponsive tab clears its verdict and its space slot", async () => {
+  const sm = new SpaceManager();
+  const fakeCdp = makeFakeCdp();
+  fakeCdp.send = async (method: string) => {
+    if (method.startsWith("Accessibility.") || method === "Page.getFrameTree") {
+      await delay(10_000);
+    }
+    return {};
+  };
+  const runtime = createEgoRuntime({
+    spaceManager: sm,
+    getCdp: () => fakeCdp,
+    ensureSession: async () => "sess-1",
+    stuckAfterMs: 40,
+    probeTimeoutMs: 20,
+  });
+  runtime.attachCdpForwarding();
+  const space = sm.createAgentSpace("frozen");
+  sm.assignTarget("t-frozen", space.id);
+  sm.use(space.id);
+  await runtime.handle("sendCDPMessage", {
+    payload: JSON.stringify({ id: 1, method: "Accessibility.getFullAXTree" }),
+  });
+  await delay(120);
+
+  // The recipe the message hands the agent: close the tab, open a fresh one.
+  await runtime.handle("sendCDPMessage", {
+    payload: JSON.stringify({
+      method: "Target.closeTarget",
+      params: { targetId: "t-frozen" },
+    }),
+  });
+
+  assert.equal(
+    sm.spaceIdForTarget("t-frozen"),
+    null,
+    "a closed tab must not stay in its space",
+  );
+  const fresh = await runtime.handle("createTab", { url: "https://x.test" });
+  assert.ok(fresh.targetId, "the space must be usable again");
 });
 
 test("a wedged read gives up the focus turn instead of holding the queue", async () => {
@@ -680,6 +778,8 @@ test("a wedged read gives up the focus turn instead of holding the queue", async
       await new Promise<void>((r) => (wedged.resolve = r));
       return { nodes: [] };
     }
+    // The liveness probe goes to the same wedged renderer.
+    if (method === "Page.getFrameTree") await delay(10_000);
     return {};
   };
   const runtime = createEgoRuntime({
