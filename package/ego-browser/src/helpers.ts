@@ -199,8 +199,8 @@ export async function useOrCreateTaskSpace(nameOrId) {
   if (!existing) {
     if (typeof nameOrId === "number") {
       throw new Error(
-      `task space not found: ${JSON.stringify(nameOrId)}. Task spaces are per-name; list them with taskSpaces.list(), or create/select one with taskSpaces.useOrCreate(name). An empty agent space is pruned after a while, so an id kept from an earlier run may be gone.`,
-    );
+        `task space not found: ${JSON.stringify(nameOrId)}. Task spaces are per-name; list them with taskSpaces.list(), or create/select one with taskSpaces.useOrCreate(name). An empty agent space is pruned after a while, so an id kept from an earlier run may be gone.`,
+      );
     }
     return newTaskSpace(nameOrId);
   }
@@ -451,7 +451,8 @@ function taskSpaceNumericId(space, op: string) {
 async function findTaskSpace(nameOrId) {
   const spaces = await listTaskSpaces();
   const match = findMatchingTaskSpace(spaces, nameOrId);
-  if (!match) throw new Error(
+  if (!match)
+    throw new Error(
       `task space not found: ${JSON.stringify(nameOrId)}. Task spaces are per-name; list them with taskSpaces.list(), or create/select one with taskSpaces.useOrCreate(name). An empty agent space is pruned after a while, so an id kept from an earlier run may be gone.`,
     );
   return match;

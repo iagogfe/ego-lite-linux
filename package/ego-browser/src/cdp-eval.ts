@@ -112,7 +112,9 @@ export function runtimeValue(response, expression) {
     const label = expressionLabel(expression);
     // Keep only the first line of the page-side description: the rest is the
     // in-page stack of the injected helper, which is noise to the agent.
-    const message = String(desc).split("\n")[0].replace(/^Error:\s*/, "");
+    const message = String(desc)
+      .split("\n")[0]
+      .replace(/^Error:\s*/, "");
     throw new Error(
       label
         ? `JavaScript evaluation failed${loc}: ${message}; expression: ${label}`

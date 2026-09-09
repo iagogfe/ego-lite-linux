@@ -1003,7 +1003,10 @@ test("a ref cannot be the parent of a nested locator, and says what to do", () =
     () => page.locator("@1522").getByRole("link"),
     /@1522 cannot be used as the parent.*locator\("@1522"\)\.snapshot\(\)/s,
   );
-  assert.throws(() => page.locator("@1522").locator("a"), /cannot be used as the parent/);
+  assert.throws(
+    () => page.locator("@1522").locator("a"),
+    /cannot be used as the parent/,
+  );
   // A malformed ref used to reach querySelectorAll and dump the generated code.
   assert.throws(
     () => page.locator("@N").getByRole("link"),

@@ -454,7 +454,11 @@ function pickPoint(el, elementFromPoint, viewport = { w: 1000, h: 800 }) {
     "innerWidth",
     "innerHeight",
     `return ${POINT_JS}`,
-  )(doc, viewport.w, viewport.h)(el);
+  )(
+    doc,
+    viewport.w,
+    viewport.h,
+  )(el);
 }
 
 test("a link wrapped across two lines is clicked on a fragment, not in the gap", () => {
@@ -500,12 +504,18 @@ test("a detached element is refused before any click is dispatched", () => {
     getClientRects: () => [],
     getBoundingClientRect: () => ({ x: 0, y: 0, width: 0, height: 0 }),
   };
-  assert.deepEqual(pickPoint(el, () => null), { error: "detached" });
+  assert.deepEqual(
+    pickPoint(el, () => null),
+    { error: "detached" },
+  );
 });
 
 test("a bad selector says what is wrong, not the browser's SyntaxError", () => {
   assert.match(
-    invalidSelectorMessage("@abc", "SyntaxError: Failed to execute 'querySelectorAll'"),
+    invalidSelectorMessage(
+      "@abc",
+      "SyntaxError: Failed to execute 'querySelectorAll'",
+    ),
     /@abc is not a valid ref.*page\.snapshot\(\)/s,
   );
   const css = invalidSelectorMessage(

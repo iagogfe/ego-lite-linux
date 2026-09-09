@@ -231,7 +231,10 @@ export function formatScriptError(error: unknown): string {
   if (Array.isArray(declared)) {
     const name = (error as Error).name || "Error";
     return (
-      [`${name}: ${(error as Error).message}`, ...declared.map((f) => `    at ${f}`)].join("\n") + "\n"
+      [
+        `${name}: ${(error as Error).message}`,
+        ...declared.map((f) => `    at ${f}`),
+      ].join("\n") + "\n"
     );
   }
   const stack = error instanceof Error ? error.stack || "" : "";

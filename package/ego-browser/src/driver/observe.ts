@@ -82,8 +82,13 @@ export async function snapshotRaw(options: SnapshotOptions = {}) {
   } catch (err) {
     // The CDP timeout in the text is the per-request budget; the agent waited
     // for the retries too, and that is the number it is comparing against.
-    if (err && typeof err === "object" && typeof (err as any).message === "string") {
-      (err as any).message = `${(err as any).message} (waited ${state.now() - startedAt}ms)`;
+    if (
+      err &&
+      typeof err === "object" &&
+      typeof (err as any).message === "string"
+    ) {
+      (err as any).message =
+        `${(err as any).message} (waited ${state.now() - startedAt}ms)`;
     }
     // ego.snapshot rejects directly (it never resolves with { error }), so it never
     // reached buildEgoError — the single birthplace that records a hard stop for the
@@ -94,7 +99,10 @@ export async function snapshotRaw(options: SnapshotOptions = {}) {
   }
   browserSnapshotRefsToRefMap(browserRefMap, result.refs || []);
   browserRefMap.documentToken = await currentDocumentToken();
-  return { ...result, content: capContent(result.content || "", maxResultLength) };
+  return {
+    ...result,
+    content: capContent(result.content || "", maxResultLength),
+  };
 }
 
 /** Context-safe default for the text surface; `0` asks for the whole page. */
@@ -119,7 +127,8 @@ function capContent(content: string, maxResultLength?: number) {
       `snapshot: maxResultLength must be 0 (whole page) or at least ${MIN_SNAPSHOT_CAP}; got ${maxResultLength}`,
     );
   }
-  if (!Number.isFinite(cap) || cap === 0 || content.length <= cap) return content;
+  if (!Number.isFinite(cap) || cap === 0 || content.length <= cap)
+    return content;
   if (cap < MIN_SNAPSHOT_CAP) {
     throw new Error(
       `snapshot: maxResultLength must be at least ${MIN_SNAPSHOT_CAP} (or 0 for the whole page); got ${cap}. Below that there is no room for content plus the truncation marker.`,
@@ -139,7 +148,9 @@ function capContent(content: string, maxResultLength?: number) {
   const longFits = long.shown.length + long.marker.length <= cap;
   const best =
     longFits && countRows(long.shown) >= countRows(short.shown) ? long : short;
-  const out = best.shown ? best.shown + best.marker : best.marker.replace(/^\n/, "");
+  const out = best.shown
+    ? best.shown + best.marker
+    : best.marker.replace(/^\n/, "");
   // Last resort for a cap that cannot hold even the short marker.
   return out.length <= cap ? out : out.slice(0, cap);
 }

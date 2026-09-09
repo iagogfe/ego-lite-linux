@@ -6,10 +6,7 @@ import {
 import { queryAllExpression as buildQueryAllExpression } from "../locator-query.js";
 import { parseRef } from "../ref-map.js";
 import { state } from "../state.js";
-import {
-  invalidSelectorMessage,
-  noMatchMessage,
-} from "../element-resolver.js";
+import { invalidSelectorMessage, noMatchMessage } from "../element-resolver.js";
 import { releaseHandle, resolveAndCall, resolveHandle } from "./element-ops.js";
 
 /**

@@ -138,7 +138,10 @@ test("a capped snapshot says how much it dropped, and keeps every ref", async ()
     const capped = await snapshot({ maxResultLength: 100 });
     // One row of 5000 x's: no room for the full marker, so the short one is used.
     assert.ok(capped.length <= 100, `got ${capped.length}`);
-    assert.match(capped, /\[snapshot truncated: \d+ of 5000 chars, \d+ of 1 rows shown/);
+    assert.match(
+      capped,
+      /\[snapshot truncated: \d+ of 5000 chars, \d+ of 1 rows shown/,
+    );
     assert.equal(await snapshot(), content);
   } finally {
     if (previous === undefined) delete globalThis.ego;
@@ -235,7 +238,12 @@ test("a text or document ref resolves to the element carrying the text", async (
       return {
         content: '@19 StaticText "Example Domain"',
         refs: [
-          { id: 19, backendNodeId: 19, role: "StaticText", name: "Example Domain" },
+          {
+            id: 19,
+            backendNodeId: 19,
+            role: "StaticText",
+            name: "Example Domain",
+          },
         ],
       };
     },
@@ -248,9 +256,15 @@ test("a text or document ref resolves to the element carrying the text", async (
       if (method === "DOM.resolveNode") {
         return { object: { objectId: "text-node", className: "Text" } };
       }
-      if (method === "Runtime.callFunctionOn" && params.objectId === "text-node") {
+      if (
+        method === "Runtime.callFunctionOn" &&
+        params.objectId === "text-node"
+      ) {
         // The promotion hop: text node -> its element.
-        assert.match(params.functionDeclaration, /nodeType===3\?this\.parentElement/);
+        assert.match(
+          params.functionDeclaration,
+          /nodeType===3\?this\.parentElement/,
+        );
         return { result: { objectId: "element-node" } };
       }
       return { result: { value: "Example Domain" } };
@@ -289,8 +303,6 @@ test("truncation lands on a line boundary and counts what it dropped", async () 
     const body = capped.split("\n[")[0];
     assert.deepEqual(body.split("\n"), ['@11 heading "One"']);
     assert.match(capped, /\[(?:snapshot )?truncated: \d+ of \d+ chars/);
-
-
   } finally {
     if (previous === undefined) delete globalThis.ego;
     else globalThis.ego = previous;
@@ -311,13 +323,17 @@ test("a ref whose element left the page fails instead of reading the dead node",
   const restore = setOverrides({
     cdpOverride: async (method) => {
       if (method === "DOM.resolveNode") {
-        return { object: { objectId: "dead-node", className: "HTMLAnchorElement" } };
+        return {
+          object: { objectId: "dead-node", className: "HTMLAnchorElement" },
+        };
       }
       if (method === "Runtime.callFunctionOn") {
         // The page-side guard: this.isConnected === false.
         return {
           result: {},
-          exceptionDetails: { exception: { description: "Error: ego-browser:detached" } },
+          exceptionDetails: {
+            exception: { description: "Error: ego-browser:detached" },
+          },
         };
       }
       return {};
@@ -369,7 +385,7 @@ test("snapshot rejects an option nobody reads, on both entry points", async () =
   const previous = globalThis.ego;
   globalThis.ego = {
     async snapshot() {
-      return { content: "@1 heading \"x\"", refs: [] };
+      return { content: '@1 heading "x"', refs: [] };
     },
     sendCDPMessage() {},
   };
@@ -379,7 +395,10 @@ test("snapshot rejects an option nobody reads, on both entry points", async () =
       /unknown option "includeStableLocatr".*Valid options: includeActionMarks, includeStableLocator, maxResultLength/s,
     );
     // The documented ones stay accepted.
-    assert.equal(typeof (await snapshot({ includeStableLocator: true })), "string");
+    assert.equal(
+      typeof (await snapshot({ includeStableLocator: true })),
+      "string",
+    );
   } finally {
     if (previous === undefined) delete globalThis.ego;
     else globalThis.ego = previous;
@@ -388,7 +407,10 @@ test("snapshot rejects an option nobody reads, on both entry points", async () =
 
 test("a cap smaller than the marker still fits, and a useless cap is refused", async () => {
   const previous = globalThis.ego;
-  const content = Array.from({ length: 40 }, (_, i) => `@${100 + i} link "row ${i}"`).join("\n");
+  const content = Array.from(
+    { length: 40 },
+    (_, i) => `@${100 + i} link "row ${i}"`,
+  ).join("\n");
   globalThis.ego = {
     async snapshot() {
       return { content, refs: [] };
@@ -419,7 +441,9 @@ test("a ref from a page that navigated away is refused, not read", async () => {
     async snapshot() {
       return {
         content: '@13 link "Jump to content"',
-        refs: [{ id: 13, backendNodeId: 13, role: "link", name: "Jump to content" }],
+        refs: [
+          { id: 13, backendNodeId: 13, role: "link", name: "Jump to content" },
+        ],
       };
     },
     sendCDPMessage() {},
@@ -427,11 +451,16 @@ test("a ref from a page that navigated away is refused, not read", async () => {
   let token = "doc-1";
   const restore = setOverrides({
     cdpOverride: async (method, params) => {
-      if (method === "Runtime.evaluate" && /__egoRefDoc/.test(params.expression)) {
+      if (
+        method === "Runtime.evaluate" &&
+        /__egoRefDoc/.test(params.expression)
+      ) {
         return { result: { value: token } };
       }
       if (method === "DOM.resolveNode") {
-        return { object: { objectId: "node-13", className: "HTMLAnchorElement" } };
+        return {
+          object: { objectId: "node-13", className: "HTMLAnchorElement" },
+        };
       }
       if (method === "Runtime.callFunctionOn") {
         if (/isConnected/.test(params.functionDeclaration)) {

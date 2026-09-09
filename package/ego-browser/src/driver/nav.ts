@@ -360,7 +360,12 @@ export async function setViewportSize(size: {
 }) {
   const width = Number(size?.width);
   const height = Number(size?.height);
-  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+  if (
+    !Number.isFinite(width) ||
+    !Number.isFinite(height) ||
+    width <= 0 ||
+    height <= 0
+  ) {
     throw new Error(
       `page.setViewportSize requires { width, height } in CSS pixels; received ${JSON.stringify(size)}`,
     );

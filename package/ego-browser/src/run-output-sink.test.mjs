@@ -184,7 +184,10 @@ test("an uncaught hard stop discards output without double-printing the message"
   // runMain reports the thrown Error on stderr, so the sink discards the buffer and
   // stays silent rather than printing the guidance a second time.
   assert.equal(result.exitCode, 1);
-  assert.match(result.stderr, /^ego-browser: .*taken control of this task space/);
+  assert.match(
+    result.stderr,
+    /^ego-browser: .*taken control of this task space/,
+  );
   assert.equal(result.stdout, "");
 });
 
@@ -204,7 +207,10 @@ test("a helper error without a tab is one actionable line, no stack", async () =
 test("script errors report the heredoc line, including inside nested functions", async () => {
   const top = await runScript(`nope()`);
   assert.equal(top.exitCode, 1);
-  assert.equal(top.stderr, "ReferenceError: nope is not defined\n    at <anonymous_script>:1:1\n");
+  assert.equal(
+    top.stderr,
+    "ReferenceError: nope is not defined\n    at <anonymous_script>:1:1\n",
+  );
 
   const nested = await runScript(
     `async function inner() { throw new TypeError("nested boom") }\nawait inner()`,
@@ -243,7 +249,10 @@ test("a syntax error reports the agent's own line, not the wrapper's token", asy
 
   const stray = await runScript(`console.log("a")\n}\nconsole.log("b")`);
   assert.equal(stray.exitCode, 1);
-  assert.match(stray.stderr, /^SyntaxError: .*\n    at <anonymous_script>:3\n$/);
+  assert.match(
+    stray.stderr,
+    /^SyntaxError: .*\n    at <anonymous_script>:3\n$/,
+  );
   assert.doesNotMatch(stray.stderr, /Node\.js v|run\.js/);
 });
 
@@ -254,7 +263,10 @@ test("an ordinary uncaught error still flushes the output logged before it", asy
   `);
 
   assert.equal(result.exitCode, 1);
-  assert.match(result.stderr, /^Error: boom\n    at <anonymous_script>:\d+:\d+\n$/);
+  assert.match(
+    result.stderr,
+    /^Error: boom\n    at <anonymous_script>:\d+:\d+\n$/,
+  );
   assert.doesNotMatch(result.stderr, /run\.js|node:internal/);
   assert.equal(result.stdout, "partial result\n");
 });

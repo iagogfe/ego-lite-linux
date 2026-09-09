@@ -247,7 +247,11 @@ test("openOrReuseTab reloads the reused tab only when asked", async () => {
   ];
   const navigations = [];
   await withEgo(
-    { async listTabs() { return { tabs }; } },
+    {
+      async listTabs() {
+        return { tabs };
+      },
+    },
     async () => {
       const restore = setOverrides({
         cdpOverride: async (method, params) => {
@@ -283,7 +287,11 @@ test("openOrReuseTab navigates a reused tab when it sits on another URL", async 
   ];
   const cdpCalls = [];
   await withEgo(
-    { async listTabs() { return { tabs }; } },
+    {
+      async listTabs() {
+        return { tabs };
+      },
+    },
     async () => {
       const restore = setOverrides({
         cdpOverride: async (method, params) => {
@@ -305,7 +313,10 @@ test("openOrReuseTab navigates a reused tab when it sits on another URL", async 
         cdpCalls.length = 0;
         tabs[0].url = "https://example.com/new-path";
         await openOrReuseTab("https://example.com/new-path", { wait: false });
-        assert.equal(cdpCalls.some(([m]) => m === "Page.navigate"), false);
+        assert.equal(
+          cdpCalls.some(([m]) => m === "Page.navigate"),
+          false,
+        );
       } finally {
         restore();
       }

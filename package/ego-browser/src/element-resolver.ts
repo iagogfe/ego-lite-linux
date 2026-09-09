@@ -53,7 +53,9 @@ function exceptionText(result: any) {
   // `description` is the page-side stack: message plus frames of the expression
   // ego-browser injected. Those `<anonymous>:3:36` lines are not in the agent's
   // script and only add noise, and the "Error: " prefix duplicates ours.
-  return String(raw).split("\n")[0].replace(/^Error:\s*/, "");
+  return String(raw)
+    .split("\n")[0]
+    .replace(/^Error:\s*/, "");
 }
 
 /**
@@ -61,7 +63,11 @@ function exceptionText(result: any) {
  * Five different phrasings for it used to make the agent treat the same
  * outcome as five different problems.
  */
-export function noMatchMessage(selector: unknown, waitedMs?: number, detail?: string) {
+export function noMatchMessage(
+  selector: unknown,
+  waitedMs?: number,
+  detail?: string,
+) {
   const waited = waitedMs === undefined ? "" : ` after waiting ${waitedMs}ms`;
   const recipe =
     waitedMs === undefined
@@ -104,7 +110,10 @@ function selectorResolutionError(selector, result) {
 export function invalidSelectorMessage(selector: unknown, detail: string) {
   const raw = String(selector).trim();
   if (raw.startsWith("@")) return invalidRefMessage(raw);
-  if (/failed to execute 'query/i.test(detail) || /is not a valid selector/i.test(detail)) {
+  if (
+    /failed to execute 'query/i.test(detail) ||
+    /is not a valid selector/i.test(detail)
+  ) {
     return `Invalid CSS selector ${JSON.stringify(raw)}: the browser cannot parse it (an unclosed bracket, quote or parenthesis?). Fix the syntax, or use a semantic locator such as page.getByRole(role, { name }).`;
   }
   return `Invalid selector ${JSON.stringify(raw)}: ${detail}`;
@@ -595,16 +604,10 @@ async function resolveLocatorObjectId(cdp, sessionId, locator) {
   }
   const count = await locatorCount(cdp, sessionId, locator);
   if (count === 0) {
-    throw new ElementResolutionError(
-      noMatchMessage(locator.raw),
-      "transient",
-    );
+    throw new ElementResolutionError(noMatchMessage(locator.raw), "transient");
   }
   if (typeof locator.nth === "number" && count <= locator.nth) {
-    throw new ElementResolutionError(
-      noMatchMessage(locator.raw),
-      "transient",
-    );
+    throw new ElementResolutionError(noMatchMessage(locator.raw), "transient");
   }
   if (locator.nth === undefined && count > 1) {
     throw new ElementResolutionError(
@@ -625,10 +628,7 @@ async function resolveLocatorObjectId(cdp, sessionId, locator) {
   );
   const objectId = result.result?.objectId;
   if (!objectId) {
-    throw new ElementResolutionError(
-      noMatchMessage(locator.raw),
-      "transient",
-    );
+    throw new ElementResolutionError(noMatchMessage(locator.raw), "transient");
   }
   return { objectId, sessionId };
 }
@@ -736,13 +736,7 @@ async function findBackendNodeIdsByRoleName(
  * The full tree stays as the fallback: iframe-scoped queries and any browser
  * that refuses the query keep working.
  */
-async function axNodesForRole(
-  cdp,
-  sessionId,
-  role,
-  name,
-  fullTreeParams: any,
-) {
+async function axNodesForRole(cdp, sessionId, role, name, fullTreeParams: any) {
   if (!fullTreeParams?.frameId) {
     try {
       const doc = await send(cdp, "DOM.getDocument", { depth: 0 }, sessionId);

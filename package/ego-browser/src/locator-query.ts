@@ -137,7 +137,8 @@ export function describeSelector(selector: unknown): string {
   const raw = String(selector);
   const nth = parseInternalNth(raw);
   if (nth) {
-    const where = nth.index === "last" ? "last match" : `match #${Number(nth.index) + 1}`;
+    const where =
+      nth.index === "last" ? "last match" : `match #${Number(nth.index) + 1}`;
     return `${describeSelector(nth.selector)} (${where})`;
   }
   const scope = parseInternalJson<InternalScope>(raw, "scope");
@@ -155,7 +156,14 @@ export function describeSelector(selector: unknown): string {
       ? `role:${role.role}[name=${JSON.stringify(name)}]`
       : `role:${role?.role}`;
   }
-  for (const kind of ["text", "label", "placeholder", "alt", "title", "testid"]) {
+  for (const kind of [
+    "text",
+    "label",
+    "placeholder",
+    "alt",
+    "title",
+    "testid",
+  ]) {
     const parsed = parseInternalJson<any>(raw, kind);
     if (parsed) {
       const value = parsed?.text ?? parsed?.value ?? parsed;

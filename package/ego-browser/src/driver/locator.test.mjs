@@ -597,14 +597,25 @@ test("the disambiguated locator a snapshot row prints resolves to that match", a
       if (method === "Accessibility.queryAXTree") {
         return {
           nodes: [
-            { role: { value: "link" }, name: { value: "Jump up" }, backendDOMNodeId: 10 },
-            { role: { value: "link" }, name: { value: "Jump up" }, backendDOMNodeId: 12 },
+            {
+              role: { value: "link" },
+              name: { value: "Jump up" },
+              backendDOMNodeId: 10,
+            },
+            {
+              role: { value: "link" },
+              name: { value: "Jump up" },
+              backendDOMNodeId: 12,
+            },
           ],
         };
       }
       if (method === "DOM.resolveNode") {
         return {
-          object: { objectId: `node-${params.backendNodeId}`, className: "HTMLAnchorElement" },
+          object: {
+            objectId: `node-${params.backendNodeId}`,
+            className: "HTMLAnchorElement",
+          },
         };
       }
       if (method === "Runtime.callFunctionOn") {
@@ -635,7 +646,10 @@ test("a zero-sized element is not visible, and the click says what to do", async
   // called them visible while the click had no box to aim at.
   const restore = setOverrides({
     cdpOverride: async (method, params) => {
-      if (method === "Runtime.evaluate" && params.objectGroup === "ego-browser") {
+      if (
+        method === "Runtime.evaluate" &&
+        params.objectGroup === "ego-browser"
+      ) {
         return { result: { objectId: "node-1" } };
       }
       if (method === "Runtime.callFunctionOn") {

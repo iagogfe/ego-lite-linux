@@ -284,9 +284,7 @@ export async function fill(selector, value, options: FillOptions = {}) {
   const timeout =
     options.timeout ?? Math.min(state.defaultTimeout, state.implicitTimeout);
   if (timeout > 0 && !(await waitForSelector(selector, { timeout }))) {
-    throw new Error(
-      noMatchMessage(selector, timeout),
-    );
+    throw new Error(noMatchMessage(selector, timeout));
   }
   await withHandle(selector, async ({ objectId, sessionId }) => {
     // Typing into a <body> or an <h1> used to "succeed" and change nothing.

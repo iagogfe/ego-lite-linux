@@ -604,7 +604,9 @@ function isInputDispatchTimeout(error: unknown) {
 async function waitForVisibleTarget(selector: string, timeout?: number) {
   const ms = timeout ?? Math.min(state.defaultTimeout, state.implicitTimeout);
   if (!(await waitForSelector(selector, { timeout: ms, state: "visible" }))) {
-    throw new Error(noMatchMessage(selector, ms, "waiting for it to be visible"));
+    throw new Error(
+      noMatchMessage(selector, ms, "waiting for it to be visible"),
+    );
   }
 }
 
@@ -620,7 +622,8 @@ async function centerWhenClickable(
   selector: string,
   timeout?: number,
 ): Promise<Point> {
-  const budget = timeout ?? Math.min(state.defaultTimeout, state.implicitTimeout);
+  const budget =
+    timeout ?? Math.min(state.defaultTimeout, state.implicitTimeout);
   const deadline = state.now() + budget;
   for (;;) {
     try {

@@ -132,9 +132,21 @@ test("every @N on a line is that node's backendNodeId", async () => {
 test("a row is the locator: no duplicated loc= suffix, no echo rows", () => {
   // The suffix used to repeat the row's own role and name, 54% of the bytes.
   const nodes = [
-    { role: { value: "heading" }, name: { value: "Security" }, backendDOMNodeId: 1 },
-    { role: { value: "StaticText" }, name: { value: "Security" }, backendDOMNodeId: 2 },
-    { role: { value: "ListMarker" }, name: { value: "\u2022 " }, backendDOMNodeId: 3 },
+    {
+      role: { value: "heading" },
+      name: { value: "Security" },
+      backendDOMNodeId: 1,
+    },
+    {
+      role: { value: "StaticText" },
+      name: { value: "Security" },
+      backendDOMNodeId: 2,
+    },
+    {
+      role: { value: "ListMarker" },
+      name: { value: "\u2022 " },
+      backendDOMNodeId: 3,
+    },
     { role: { value: "link" }, name: { value: "Kernel" }, backendDOMNodeId: 4 },
   ];
   const bare = axTreeToSnapshot(nodes, { includeActionMarks: true });
@@ -148,14 +160,29 @@ test("a row is the locator: no duplicated loc= suffix, no echo rows", () => {
     includeActionMarks: true,
     includeStableLocator: true,
   });
-  assert.match(withLoc.content, /@1 heading "Security" loc=role:heading\[name="Security"\]/);
+  assert.match(
+    withLoc.content,
+    /@1 heading "Security" loc=role:heading\[name="Security"\]/,
+  );
 });
 
 test("an ambiguous role+name row carries the disambiguated locator", () => {
   const nodes = [
-    { role: { value: "link" }, name: { value: "Jump up" }, backendDOMNodeId: 10 },
-    { role: { value: "link" }, name: { value: "Kernel" }, backendDOMNodeId: 11 },
-    { role: { value: "link" }, name: { value: "Jump up" }, backendDOMNodeId: 12 },
+    {
+      role: { value: "link" },
+      name: { value: "Jump up" },
+      backendDOMNodeId: 10,
+    },
+    {
+      role: { value: "link" },
+      name: { value: "Kernel" },
+      backendDOMNodeId: 11,
+    },
+    {
+      role: { value: "link" },
+      name: { value: "Jump up" },
+      backendDOMNodeId: 12,
+    },
     { role: { value: "table" }, name: { value: "" }, backendDOMNodeId: 13 },
     { role: { value: "table" }, name: { value: "" }, backendDOMNodeId: 14 },
   ];
@@ -257,7 +284,8 @@ test("snapshotPage scoped to a node reads only that subtree", async () => {
 test("an accessibility timeout says what it usually means and what to do", async () => {
   const transport = mockTransport();
   transport.autoReply((msg) => {
-    if (msg.method === "Accessibility.enable") return { id: msg.id, result: {} };
+    if (msg.method === "Accessibility.enable")
+      return { id: msg.id, result: {} };
     if (msg.method === "DOM.getDocument") {
       return { id: msg.id, result: { root: { backendNodeId: 1 } } };
     }

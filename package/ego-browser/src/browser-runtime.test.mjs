@@ -869,7 +869,9 @@ test("ensureSession keeps the tab this run opened, even when listTabs drops it",
   // The host's tab list follows a task-space selection shared by every
   // ego-browser process on the host: another agent selecting its own space
   // must not redirect this run to that agent's page.
-  const calls = installAutoEgo({ tabs: [{ targetId: "other-agent-tab", active: true }] });
+  const calls = installAutoEgo({
+    tabs: [{ targetId: "other-agent-tab", active: true }],
+  });
   try {
     setPreferredTarget("my-tab");
     await ensureSession();
