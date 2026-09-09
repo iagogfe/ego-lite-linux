@@ -416,3 +416,36 @@ test("evaluate attaches to a target session when legacy target id is given", asy
     restore();
   }
 });
+
+test("a timeout does not echo ego-browser's own injected source", async () => {
+  // The helpers inject an arrow IIFE; quoting it back dumps ego-browser's own
+  // source into the agent's error and says nothing about the agent's code.
+  const injected =
+    "(() => {\n    const root = document.documentElement;\n    return JSON.stringify({ url: location.href });\n  })()";
+  const restore = setOverrides({
+    cdpOverride: async () => {
+      throw new Error("CDP request timed out: Runtime.evaluate");
+    },
+  });
+  try {
+    await assert.rejects(
+      () => evaluate(injected),
+      (err) => {
+        assert.match(err.message, /Runtime\.evaluate timed out/);
+        assert.equal(
+          /document\.documentElement/.test(err.message),
+          false,
+          `injected source leaked: ${err.message}`,
+        );
+        return true;
+      },
+    );
+    // The agent's own expression is still worth quoting back.
+    await assert.rejects(
+      () => evaluate("myOwnHelper(1)"),
+      (err) => /myOwnHelper\(1\)/.test(err.message),
+    );
+  } finally {
+    restore();
+  }
+});

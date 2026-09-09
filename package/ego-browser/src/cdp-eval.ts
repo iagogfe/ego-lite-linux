@@ -80,8 +80,11 @@ async function runtimeEvaluate(
     return runtimeValue(response, expression);
   } catch (error) {
     if (/timed out/i.test(error?.message || "")) {
+      const label = expressionLabel(expression);
       throw new Error(
-        `Runtime.evaluate timed out; expression: ${jsSnippet(expression)}`,
+        label
+          ? `Runtime.evaluate timed out; expression: ${label}`
+          : "Runtime.evaluate timed out",
       );
     }
     throw error;
@@ -95,8 +98,11 @@ async function runtimeEvaluate(
  * in-page stack.
  */
 function expressionLabel(expression: unknown) {
-  const text = String(expression ?? "");
-  const helper = /^function\s*\(/.test(text.trim());
+  const text = String(expression ?? "").trim();
+  // The sources ego-browser injects are a bare function or an arrow IIFE;
+  // quoting them back tells the agent nothing about its own code and dumps
+  // dozens of lines of helper source into the error.
+  const helper = /^function\s*\(/.test(text) || /^\(\s*\(\s*\)\s*=>/.test(text);
   return helper ? null : jsSnippet(text);
 }
 

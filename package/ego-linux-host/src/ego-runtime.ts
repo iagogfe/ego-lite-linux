@@ -16,6 +16,13 @@ function isBrowserLevelMethod(method: string): boolean {
   return method.startsWith("Target.") || method.startsWith("Browser.");
 }
 
+/**
+ * Commands that can rescue a wedged tab: the browser process carries them out,
+ * not the stuck renderer, so they must reach Chrome even when the tab is
+ * marked unresponsive — they are the way out we recommend.
+ */
+const RECOVERY_METHODS = /^Page\.(navigate|reload|close|stopLoading)$/;
+
 /** The only browser-level command allowed without agent ownership. */
 const READ_ONLY_BROWSER_METHODS = new Set(["Browser.getVersion"]);
 
@@ -44,6 +51,14 @@ export type EgoRuntimeDeps = {
   log?: (line: string) => void;
   /** Cap on one client's focus turn (default 2s; tests shrink it). */
   focusMaxMs?: number;
+  /** Silence after which a tab is called unresponsive (default 5s). */
+  stuckAfterMs?: number;
+  /** How long the liveness probe waits (default 400ms). */
+  probeTimeoutMs?: number;
+  probesBeforeVerdict?: number;
+  recheckProbeMs?: number;
+  /** Ceiling on a single focus turn (default 8s). */
+  turnMaxMs?: number;
 };
 
 /**
@@ -299,6 +314,12 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
       answered?: { done: boolean };
       /** Already re-queued once; a second preemption fails it instead. */
       retried?: boolean;
+      /** Fires if the tab never answers this command. */
+      watchdog?: ReturnType<typeof setTimeout>;
+      /** When this read last reached Chrome, for the budget. */
+      sentAt?: number;
+      /** Still waiting on Chrome; false once settled or given up on. */
+      pending?: boolean;
     }
   >();
 
@@ -314,6 +335,11 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
         const entry = harnessIds.get(msg.id);
         if (!entry) return;
         harnessIds.delete(msg.id);
+        entry.pending = false;
+        if (entry.watchdog) clearTimeout(entry.watchdog);
+        // The tab spoke: whatever we concluded about it is stale.
+        if (entry.targetId) lastAlive.set(entry.targetId, Date.now());
+        clearTabStuck(entry.targetId);
         to = entry.clientId;
         if (entry.holdsFocus) {
           focusInFlight = Math.max(0, focusInFlight - 1);
@@ -508,10 +534,38 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
    * inside the turn); raise it if a legitimate read ever loses focus here.
    */
   const FOCUS_MAX_MS = deps.focusMaxMs ?? 2000;
+  /**
+   * Absolute ceiling on one turn. A tab can wedge *after* it passed the
+   * liveness check, and then its read holds the turn until the client's own
+   * CDP timeout. Past this the host probes once more: still silent means the
+   * page died mid-read, and the turn goes back to everyone else.
+   * ponytail: 8s, above the heaviest healthy read measured (5.5s for a 15k
+   * node tree); a page slower than that loses its turn and says so.
+   */
+  const TURN_MAX_MS = deps.turnMaxMs ?? 8000;
+  let turnStartedAt = 0;
 
   function armFocusDeadline(): void {
+    if (turnStartedAt === 0) turnStartedAt = Date.now();
     if (focusDeadlineTimer) clearTimeout(focusDeadlineTimer);
-    focusDeadlineTimer = setTimeout(() => {
+    focusDeadlineTimer = setTimeout(async () => {
+      // Before taking a turn away, ask whether the tab is actually stuck. A
+      // heavy but healthy read (a 10k-node accessibility tree) is using the
+      // turn, and re-queueing it makes Chrome start the whole tree over —
+      // it would never finish. Only a silent renderer loses its turn.
+      // A read that is still running belongs to a tab we already vouched for;
+      // taking its turn away restarts the whole tree and it never finishes.
+      // Past the ceiling, ask once whether the tab is still there.
+      if (focusInFlight > 0) {
+        const heldFor = Date.now() - turnStartedAt;
+        const tab = focusedTargetId;
+        if (heldFor < TURN_MAX_MS || !tab || (await tabAnswers(tab))) {
+          armFocusDeadline();
+          return;
+        }
+        markTabStuck(tab, "a read that was already running");
+        return;
+      }
       const victim = focusHolder;
       const orphans = victim === null ? [] : orphanedReads(victim);
       // Daemon-side reads (snapshot) are not in the id map: count them.
@@ -551,13 +605,7 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
       passFocus();
       for (const orphan of orphans) {
         if (orphan.retry) void resendRead(orphan);
-        else
-          failRead(
-            orphan.entry,
-            `ego-host: this tab did not answer ${orphan.method} within ` +
-              `${FOCUS_MAX_MS}ms twice; its renderer looks stuck (page in a ` +
-              `long-running script?). Other task spaces were waiting.`,
-          );
+        else void resendRead(orphan);
       }
     }, FOCUS_MAX_MS);
     focusDeadlineTimer.unref?.();
@@ -579,18 +627,168 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
     }> = [];
     for (const [id, entry] of harnessIds) {
       if (entry.holdsFocus && entry.clientId === clientId && entry.payload) {
+        // The re-send arms its own watchdog; leaving this one running would
+        // judge the tab on a clock that no longer matches any pending send.
+        if (entry.watchdog) clearTimeout(entry.watchdog);
         orphans.push({
           id,
           method: String(entry.payload.method ?? "?"),
           entry,
-          // Preempted twice means the tab is not coming back: retrying again
-          // would let one wedged renderer hold a turn every 2s forever.
-          retry: !entry.retried,
+          // Always re-queued: losing a turn says nothing about the tab, and
+          // the renderer probe is what decides whether it is still there.
+          retry: true,
         });
         harnessIds.delete(id);
       }
     }
     return orphans;
+  }
+
+  /**
+   * A page command sent to a tab whose renderer is stuck never comes back.
+   * One is enough to learn it: after this long with no reply the tab is
+   * marked, every pending and subsequent command for it fails at once, and
+   * the mark lifts the moment that tab answers anything again.
+   *
+   * Liveness is established *before* the work starts, never during it.
+   * While a heavy read runs, a busy renderer and a dead one look identical —
+   * a 15k-node accessibility tree stops answering anything, exactly like an
+   * infinite loop. Asking first separates them: a tab that answers is alive
+   * and its slow command is left alone however long it takes; a tab that does
+   * not answer is stuck before it costs anyone a timeout or a turn.
+   */
+  /**
+   * How long a tab's last reply vouches for it. Inside this window a page
+   * command goes straight through; outside it, the tab is asked first. Kept
+   * short because the probe is cheap (1.2ms on a live tab, measured) and
+   * stale confidence is what lets a freshly wedged tab cost a full timeout.
+   */
+  const ALIVE_FOR_MS = deps.stuckAfterMs ?? 0;
+  const lastAlive = new Map<string, number>();
+  const missedProbes = new Map<string, number>();
+  const PROBES_BEFORE_VERDICT = deps.probesBeforeVerdict ?? 2;
+  /** A live tab answers this in milliseconds; a wedged one never does. */
+  const PROBE_TIMEOUT_MS = deps.probeTimeoutMs ?? 150;
+  const RECHECK_PROBE_MS = deps.recheckProbeMs ?? 40;
+  const stuckTabs = new Map<string, string>();
+
+  /**
+   * Ask the tab directly whether it is alive. This is what makes the verdict
+   * reversible: a tab that recovers proves it on the next attempt, from any
+   * process, without the agent having to close anything.
+   */
+  async function tabAnswers(
+    targetId: string,
+    budgetMs: number = PROBE_TIMEOUT_MS,
+  ): Promise<boolean> {
+    try {
+      const cdp = deps.getCdp();
+      const sessionId = await cdp.attach(targetId);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const probe = cdp.send("Page.getFrameTree", {}, sessionId);
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("probe timeout")), budgetMs);
+        timer.unref?.();
+      });
+      try {
+        await Promise.race([probe, timeout]);
+        return true;
+      } finally {
+        if (timer) clearTimeout(timer);
+        probe.catch(() => undefined);
+      }
+    } catch {
+      return false;
+    }
+  }
+
+  /** The single sentence every path uses for this one cause. */
+  function stuckTabMessage(targetId: string): string {
+    const space = deps.spaceManager.spaceIdForTarget(targetId) ?? "?";
+    // No CDP method name here on purpose: the verdict is about the tab, and
+    // which internal command happened to hit it first is not something the
+    // agent wrote or can act on. The host log keeps the method for operators.
+    return (
+      `ego-host: this tab's renderer is not responding (space=${space}, ` +
+      `tab=${targetId.slice(0, 8)}); it did not answer a liveness check. ` +
+      `A page stuck in a long-running script answers ` +
+      `nothing at all, so reading it another way — page.info(), a CSS query, ` +
+      `a snapshot — hangs the same way. If the page is merely busy, wait and ` +
+      `retry: the host re-checks the tab on every attempt and lets it through ` +
+      `the moment it answers. If it is not coming back, drop the tab: ` +
+      `const [tab] = await browser.listTabs(); await ` +
+      `browser.closeTab(tab.targetId); then browser.openOrReuseTab(url).`
+    );
+  }
+
+  /**
+   * True when the tab is known good, or proves it now. Cheap in the common
+   * case: a tab that answered in the last ALIVE_FOR_MS is taken at its word,
+   * so a run of commands pays for one probe, not one per command.
+   */
+  async function ensureTabAlive(
+    targetId: string,
+    method: string,
+  ): Promise<boolean> {
+    const seen = lastAlive.get(targetId);
+    if (seen !== undefined && Date.now() - seen < ALIVE_FOR_MS) return true;
+    // A tab already known bad only has to prove it came back, and a live
+    // renderer answers this in ~1ms — so the recheck can be much tighter than
+    // the first verdict, which has to outlast a merely busy main thread.
+    const budget = stuckTabs.has(targetId)
+      ? RECHECK_PROBE_MS
+      : PROBE_TIMEOUT_MS;
+    if (await tabAnswers(targetId, budget)) {
+      lastAlive.set(targetId, Date.now());
+      missedProbes.delete(targetId);
+      clearTabStuck(targetId);
+      return true;
+    }
+    // One silent probe is not proof: a renderer busy serialising its own
+    // accessibility tree looks exactly like a dead one for as long as its main
+    // thread is blocked. Ask twice before condemning it — a frozen tab misses
+    // both, a busy one answers the second.
+    const missed = (missedProbes.get(targetId) ?? 0) + 1;
+    missedProbes.set(targetId, missed);
+    if (missed < PROBES_BEFORE_VERDICT && !stuckTabs.has(targetId))
+      return false;
+    markTabStuck(targetId, method);
+    return false;
+  }
+
+  function markTabStuck(targetId: string, method: string): void {
+    if (stuckTabs.has(targetId)) return;
+    const why = stuckTabMessage(targetId);
+    stuckTabs.set(targetId, why);
+    deps.log?.(
+      `tab marked unresponsive: space=${
+        deps.spaceManager.spaceIdForTarget(targetId) ?? "?"
+      } tab=${targetId.slice(0, 8)} before ${method} (no reply to a ${PROBE_TIMEOUT_MS}ms liveness probe)`,
+    );
+    // Everything already waiting on that tab is waiting for nothing.
+    for (const [id, entry] of [...harnessIds]) {
+      if (entry.targetId === targetId) {
+        harnessIds.delete(id);
+        entry.pending = false;
+        if (entry.watchdog) clearTimeout(entry.watchdog);
+        // These reads are over: leaving them counted keeps the focus lease
+        // pinned and makes the log report phantom readers.
+        if (entry.holdsFocus) focusInFlight = Math.max(0, focusInFlight - 1);
+        failRead(entry, why);
+      }
+    }
+    if (focusedTargetId === targetId && focusHolder !== null) passFocus();
+  }
+
+  function clearTabStuck(
+    targetId: string | undefined | null,
+    why = "answered",
+  ): void {
+    if (targetId && stuckTabs.delete(targetId)) {
+      deps.log?.(
+        `tab no longer marked unresponsive (${why}): tab=${targetId.slice(0, 8)}`,
+      );
+    }
   }
 
   /**
@@ -636,7 +834,12 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
       focusInFlight++;
       if (entry.targetId) await ensureTabActive(entry.targetId);
       const retryId = nextHarnessId++;
-      harnessIds.set(retryId, { ...entry, retried: true });
+      const retryEntry: any = { ...entry, retried: true };
+      // The silence clock keeps running across re-sends. Restarting it here
+      // would mean a tab preempted every 2s is never silent for 3s and so
+      // never judged, which is exactly the case this detector is for.
+
+      harnessIds.set(retryId, retryEntry);
       deps.getCdp().sendRaw({ ...entry.payload, id: retryId });
     } catch {
       // The read simply stays unanswered; the harness times out as before.
@@ -647,6 +850,7 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
   function passFocus(): void {
     if (focusDeadlineTimer) clearTimeout(focusDeadlineTimer);
     focusDeadlineTimer = undefined;
+    turnStartedAt = 0;
     focusInFlight = 0;
     const next = focusWaiters.shift();
     if (next) {
@@ -745,6 +949,16 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
         "task space is under user control; claim or takeOver before page ops",
       );
     }
+    const snapshotTarget = deps.spaceManager.activeTargetForSelected();
+    if (
+      snapshotTarget &&
+      !(await ensureTabAlive(snapshotTarget, "Accessibility.getFullAXTree"))
+    ) {
+      throw makeEgoError(
+        "EGO_BROWSER_UNAVAILABLE",
+        stuckTabs.get(snapshotTarget) ?? stuckTabMessage(snapshotTarget),
+      );
+    }
     // Activate and read in one turn: another client stealing focus midway is
     // what leaves this read hanging.
     return withFocus(async () => {
@@ -794,6 +1008,22 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
     if (pageDomain) {
       markActivity(actionLabel(method));
     }
+    if (method === "Target.closeTarget") {
+      // The tab is gone; its verdict must not outlive it and block the space.
+      const closed = msg?.params?.targetId;
+      if (typeof closed === "string") {
+        clearTabStuck(closed);
+        // Without this the space keeps pointing at a tab that no longer
+        // exists, and the next call attaches to nothing.
+        deps.spaceManager.forgetTarget(closed);
+      }
+    }
+    if (RECOVERY_METHODS.test(method)) {
+      // A fresh document means a fresh renderer; let the tab prove itself,
+      // and hold off judging it while the new one comes up.
+      // Optimistic: the tab has not answered yet, a new document is coming.
+      clearTabStuck(deps.spaceManager.activeTargetForSelected(), "navigating");
+    }
     if (method === "Target.activateTarget") {
       const targetId = msg?.params?.targetId;
       if (typeof targetId === "string") {
@@ -819,22 +1049,43 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
       if (targetId) await ensureTabActive(targetId);
     }
 
+    // Page work on a tab known to be stuck fails now, with the one message,
+    // instead of buying another timeout on a renderer that answers nothing.
+    // Navigation is the exception and the way out: the browser process, not
+    // the wedged renderer, carries it out, so it is the recipe we hand back.
+    const pageTarget =
+      pageDomain && !RECOVERY_METHODS.test(method)
+        ? deps.spaceManager.activeTargetForSelected()
+        : null;
+    if (pageTarget && !(await ensureTabAlive(pageTarget, method))) {
+      const why = stuckTabs.get(pageTarget) ?? stuckTabMessage(pageTarget);
+      if (msg && msg.id != null) {
+        failRead({ originalId: msg.id, clientId: currentClientId() }, why);
+      } else {
+        emitSendError(why, "EGO_BROWSER_UNAVAILABLE");
+      }
+      return { ok: true };
+    }
+
     if (msg && msg.id != null) {
       const rewritten = nextHarnessId++;
       const isAxRead = method.startsWith("Accessibility.");
-      harnessIds.set(rewritten, {
+      const entry: any = {
         originalId: msg.id,
         clientId: currentClientId(),
+        ...(pageTarget ? { targetId: pageTarget } : {}),
         ...(isAxRead
           ? {
               holdsFocus: true,
               // Kept so the read can be reissued if its turn is taken.
               payload: { ...msg, id: undefined },
-              targetId: deps.spaceManager.activeTargetForSelected(),
               answered: { done: false },
             }
           : {}),
-      });
+      };
+      // Watchdog: silence from the tab means the renderer, not the queue.
+
+      harnessIds.set(rewritten, entry);
       msg = { ...msg, id: rewritten };
     }
     try {

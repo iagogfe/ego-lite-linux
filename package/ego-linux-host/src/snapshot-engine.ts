@@ -287,9 +287,9 @@ function timeoutAdvice(detail: string): string {
   if (!/timeout/i.test(detail) || !/Accessibility\./.test(detail)) return "";
   return (
     ". Chrome answers accessibility requests only for its focused tab; the host takes that focus turn for you, so the" +
-    " usual cause left is the page itself — a renderer stuck in a long task, or one that died. Check it with" +
-    " page.info() or a CSS read (neither needs focus), then retry; activating the tab by hand" +
-    " (const [tab] = await browser.listTabs(); await browser.switchTab(tab.targetId)) is the last resort." +
+    " usual cause left is the page itself — a renderer stuck in a long task, or one that died. Do not probe it another" +
+    " way: page.info() and CSS reads go to the same renderer and hang just as long. The host reports a tab that stops" +
+    " answering, and the fix it names is to drop the tab (browser.closeTab) and open a fresh one." +
     " Scoping the snapshot to a region or capping maxResultLength does not help: the whole tree is computed either way."
   );
 }
