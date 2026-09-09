@@ -51,10 +51,13 @@ function rawCdp(
     params,
     ...(sessionId ? { sessionId } : {}),
   });
+  // Built here, inside the script's await chain, so the async stack still
+  // names the heredoc line; an Error born in the timer callback would not.
+  const timeoutError = new Error(`CDP request timed out: ${method}`);
   return new Promise<any>((resolve, reject) => {
     const timer = setTimeout(() => {
       pending.delete(id);
-      reject(new Error(`CDP request timed out: ${method}`));
+      reject(timeoutError);
     }, timeoutMs);
     pending.set(id, {
       resolve: (response) => {
@@ -115,13 +118,21 @@ export async function ensureSession() {
     try {
       const result = assertNoEgoError(await browserEgo().listTabs());
       const tabs = result?.tabs || result?.targetInfos || [];
+      // A tab this run opened or switched to wins outright, even when it is
+      // missing from listTabs: the host's tab list follows a task-space
+      // selection shared by every ego-browser process on the host, so another
+      // agent selecting its own space must never redirect this one's page.
       const preferred = state.preferredTargetId
-        ? tabs.find((t) => t.targetId === state.preferredTargetId)
+        ? (tabs.find((t) => t.targetId === state.preferredTargetId) ?? {
+            targetId: state.preferredTargetId,
+          })
         : null;
       const active =
         preferred || tabs.find((t) => t.active) || tabs[tabs.length - 1];
       if (!active) {
-        throw new Error("no active tab to attach session");
+        throw new Error(
+          "no active tab — call taskSpaces.useOrCreate(name) and browser.openOrReuseTab(url) first",
+        );
       }
       const targetId = active.targetId;
       if (targetId !== state.sessionTargetId || !state.sessionId) {
@@ -310,8 +321,10 @@ function handleMessage(message) {
   }
 }
 
-export function browserSnapshotRefsToRefMap(refMap, refs = []) {
-  refMap.clear();
+export function browserSnapshotRefsToRefMap(refMap, refs = [], merge = false) {
+  // A scoped (subtree) snapshot adds to the map: dropping the page-wide refs
+  // would invalidate every @N the agent already has.
+  if (!merge) refMap.clear();
   for (const ref of refs) {
     if (!ref || typeof ref !== "object") {
       continue;

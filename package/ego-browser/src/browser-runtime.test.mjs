@@ -153,10 +153,16 @@ test("browserCdp rejects when CDP response carries an error", async () => {
 test("browserCdp times out when no response arrives", async () => {
   installManualEgo();
   try {
-    await assert.rejects(
-      () => browserCdp("Runtime.evaluate", {}, "sess-1", 100),
-      /CDP request timed out: Runtime\.evaluate/,
-    );
+    // Named caller stands in for the heredoc: the timeout error must still
+    // carry the async frame of whoever awaited it, not just the timer's.
+    async function scriptLine() {
+      await browserCdp("Runtime.evaluate", {}, "sess-1", 100);
+    }
+    await assert.rejects(scriptLine, (error) => {
+      assert.match(error.message, /CDP request timed out: Runtime\.evaluate/);
+      assert.match(error.stack, /at (?:async )?scriptLine/);
+      return true;
+    });
   } finally {
     cleanup();
   }
@@ -812,8 +818,8 @@ test("browserSnapshotRefsToRefMap populates ref map from snapshot refs", () => {
     },
   };
   browserSnapshotRefsToRefMap(refMap, [
-    { backendNodeId: 42, role: "button", name: "Submit" },
-    { backendNodeId: 100, role: "link", name: "Home" },
+    { id: 42, backendNodeId: 42, role: "button", name: "Submit" },
+    { id: 100, backendNodeId: 100, role: "link", name: "Home" },
   ]);
   assert.equal(refMap._data.size, 2);
   assert.equal(refMap._data.get("42").role, "button");
@@ -831,7 +837,7 @@ test("browserSnapshotRefsToRefMap clears the map before populating", () => {
     },
   };
   browserSnapshotRefsToRefMap(refMap, [
-    { backendNodeId: 5, role: "textbox", name: "" },
+    { id: 5, backendNodeId: 5, role: "textbox", name: "" },
   ]);
   assert.equal(refMap._data.size, 1);
   assert.equal(refMap._data.has("old"), false, "old entries cleared");
@@ -851,10 +857,25 @@ test("browserSnapshotRefsToRefMap skips null, non-object, and missing backendNod
     null,
     "not an object",
     { role: "button" },
-    { backendNodeId: null, role: "button" },
-    { backendNodeId: undefined, role: "button" },
-    { backendNodeId: 7, role: "link", name: "ok" },
+    { id: 3, backendNodeId: null, role: "button" },
+    { id: 4, backendNodeId: undefined, role: "button" },
+    { id: 7, backendNodeId: 7, role: "link", name: "ok" },
   ]);
   assert.equal(refMap._data.size, 1, "only the valid ref is added");
   assert.ok(refMap._data.has("7"));
+});
+
+test("ensureSession keeps the tab this run opened, even when listTabs drops it", async () => {
+  // The host's tab list follows a task-space selection shared by every
+  // ego-browser process on the host: another agent selecting its own space
+  // must not redirect this run to that agent's page.
+  const calls = installAutoEgo({ tabs: [{ targetId: "other-agent-tab", active: true }] });
+  try {
+    setPreferredTarget("my-tab");
+    await ensureSession();
+    const attach = calls.find((c) => c.method === "Target.attachToTarget");
+    assert.equal(attach.params.targetId, "my-tab");
+  } finally {
+    cleanup();
+  }
 });

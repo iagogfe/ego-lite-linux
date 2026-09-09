@@ -3,6 +3,8 @@ import { browserCdp } from "../browser-runtime.js";
 import { withHandle, resolveAndCall } from "./element-ops.js";
 import { waitForSelector } from "./waits.js";
 import { state } from "../state.js";
+import { describeSelector } from "../locator-query.js";
+import { noMatchMessage } from "../element-resolver.js";
 
 type FillOptions = {
   clearFirst?: boolean;
@@ -279,11 +281,32 @@ export async function focus(selector) {
  */
 export async function fill(selector, value, options: FillOptions = {}) {
   const clearFirst = options.clearFirst ?? true;
-  const timeout = options.timeout ?? state.defaultTimeout;
+  const timeout =
+    options.timeout ?? Math.min(state.defaultTimeout, state.implicitTimeout);
   if (timeout > 0 && !(await waitForSelector(selector, { timeout }))) {
-    throw new Error(`fill: element not found: ${JSON.stringify(selector)}`);
+    throw new Error(
+      noMatchMessage(selector, timeout),
+    );
   }
   await withHandle(selector, async ({ objectId, sessionId }) => {
+    // Typing into a <body> or an <h1> used to "succeed" and change nothing.
+    const kind = await cdp(
+      "Runtime.callFunctionOn",
+      {
+        objectId,
+        functionDeclaration:
+          "function(){ if (this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement) return 'field'; if (this.isContentEditable) return 'editable'; if (this instanceof HTMLSelectElement) return 'select'; return (this.tagName || 'node').toLowerCase(); }",
+        returnByValue: true,
+      },
+      sessionId,
+    );
+    const editable = kind?.result?.value;
+    if (editable !== "field" && editable !== "editable") {
+      throw new Error(
+        `fill: <${editable}> does not accept typed text${editable === "select" ? " — use locator.selectOption(value) for a <select>" : ""}. ` +
+          `Target the input, textarea or contenteditable element instead (page.getByRole("textbox"|"searchbox", { name }), or the field the label points at).`,
+      );
+    }
     const focusSource = clearFirst
       ? "function(){this.focus(); if(this.isContentEditable){const range=document.createRange();range.selectNodeContents(this);const sel=getSelection();sel.removeAllRanges();sel.addRange(range);}else if(typeof this.select==='function') this.select();}"
       : "function(){this.focus();}";
@@ -401,7 +424,7 @@ export async function setChecked(selector, checked) {
     selector,
     `function(checked){
       if (!(this instanceof HTMLInputElement) || (this.type !== "checkbox" && this.type !== "radio")) {
-        throw new Error("setChecked target must be a checkbox or radio input");
+        throw new Error('check/uncheck needs a checkbox or radio input; this element is a <' + this.tagName.toLowerCase() + '>. Use page.getByRole with role checkbox or radio and the accessible name, or click the label that toggles it');
       }
       if (this.type === "radio" && !checked) {
         throw new Error("setChecked cannot uncheck a radio input");
@@ -429,7 +452,7 @@ export async function selectOption(
     selector,
     `function(values){
       if (!(this instanceof HTMLSelectElement)) {
-        throw new Error("selectOption target must be a select element");
+        throw new Error('selectOption needs a <select>; this element is a <' + this.tagName.toLowerCase() + '>. Use page.getByRole with role combobox and the accessible name for a native dropdown, or click the option for a custom one');
       }
       const wanted = Array.isArray(values) ? values : [values];
       const selected = [];
@@ -461,9 +484,12 @@ export async function selectOption(
   return result.result?.value || [];
 }
 
-async function focusWithTimeout(selector, timeout = state.defaultTimeout) {
+async function focusWithTimeout(
+  selector,
+  timeout = Math.min(state.defaultTimeout, state.implicitTimeout),
+) {
   if (timeout > 0 && !(await waitForSelector(selector, { timeout }))) {
-    throw new Error(`focus: element not found: ${JSON.stringify(selector)}`);
+    throw new Error(noMatchMessage(selector, timeout));
   }
   await focus(selector);
 }

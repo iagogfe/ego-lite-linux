@@ -35,12 +35,19 @@ export const state = {
   sessionInflight: null,
   preferredTargetId: null,
   defaultTimeout: 10000,
+  // Implicit waits (element reads, and the "is it there yet" wait an action
+  // does before pointing at its target) share this budget, so two spellings of
+  // the same step cannot fail 7 seconds apart. An explicit `timeout` option or
+  // page.setDefaultTimeout() still wins.
+  implicitTimeout: 3000,
   // Last observed Network domain state on the default session (tracked in cdp()).
   networkDomainEnabled: false,
 };
 
 export async function send(req) {
-  return state.send(req);
+  // `return await`: a bare `return promise` in an async function breaks the
+  // async stack chain, and helper timeouts then lose the heredoc line.
+  return await state.send(req);
 }
 
 export function setOverrides(overrides) {

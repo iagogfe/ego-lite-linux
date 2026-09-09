@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  POINT_JS,
+  invalidSelectorMessage,
   resolveElementCenter,
   resolveElementObjectId,
   ElementResolutionError,
@@ -20,6 +22,16 @@ class FakeCDP {
   }
 }
 
+/**
+ * The point picker runs in the page now (fragment-aware, hit-tested), so a
+ * centre is DOM.resolveNode + Runtime.callFunctionOn instead of DOM.getBoxModel.
+ */
+function pointReply(method, point) {
+  if (method === "DOM.resolveNode") return { object: { objectId: "node-1" } };
+  if (method === "Runtime.callFunctionOn") return { result: { value: point } };
+  return null;
+}
+
 const AX_TREE = {
   nodes: [
     { role: { value: "button" }, name: { value: "ok" }, backendDOMNodeId: 100 },
@@ -34,10 +46,7 @@ test("resolveElementCenter computes the center from a valid box model", async ()
   const refMap = new RefMap();
   refMap.add("5", 100, "button", "ok");
   const cdp = new FakeCDP(async (method) => {
-    if (method === "DOM.getBoxModel") {
-      return { model: { content: [10, 20, 30, 20, 30, 60, 10, 60] } };
-    }
-    return {};
+    return pointReply(method, { x: 20, y: 40 }) ?? {};
   });
   const point = await resolveElementCenter(cdp, undefined, refMap, "@5");
   assert.equal(point.x, 20);
@@ -50,13 +59,10 @@ test("degenerate box model throws transient instead of returning (0,0)", async (
   const refMap = new RefMap();
   refMap.add("5", 100, "button", "ok");
   const cdp = new FakeCDP(async (method) => {
-    if (method === "DOM.getBoxModel") {
-      return { model: { content: [] } };
-    }
     if (method === "Accessibility.getFullAXTree") {
       return AX_TREE;
     }
-    return {};
+    return pointReply(method, { error: "no-box" }) ?? {};
   });
   await assert.rejects(
     () => resolveElementCenter(cdp, undefined, refMap, "@5"),
@@ -76,19 +82,19 @@ test("degenerate box model throws transient instead of returning (0,0)", async (
 test("stale backend node still falls back to role/name lookup", async () => {
   const refMap = new RefMap();
   refMap.add("5", 100, "button", "ok");
-  let boxModelCalls = 0;
+  let resolveCalls = 0;
   const cdp = new FakeCDP(async (method) => {
-    if (method === "DOM.getBoxModel") {
-      boxModelCalls += 1;
-      if (boxModelCalls === 1) {
+    if (method === "DOM.resolveNode") {
+      resolveCalls += 1;
+      if (resolveCalls === 1) {
         throw new Error("No node with given id found");
       }
-      return { model: { content: [0, 0, 10, 0, 10, 10, 0, 10] } };
+      return { object: { objectId: "node-1" } };
     }
     if (method === "Accessibility.getFullAXTree") {
       return AX_TREE;
     }
-    return {};
+    return pointReply(method, { x: 5, y: 5 }) ?? {};
   });
   const point = await resolveElementCenter(cdp, undefined, refMap, "@5");
   assert.equal(point.x, 5);
@@ -273,10 +279,7 @@ test("role locator matches numeric AX names", async () => {
         ],
       };
     }
-    if (method === "DOM.getBoxModel") {
-      return { model: { content: [10, 20, 30, 20, 30, 60, 10, 60] } };
-    }
-    return {};
+    return pointReply(method, { x: 20, y: 40 }) ?? {};
   });
   const point = await resolveElementCenter(
     cdp,
@@ -300,10 +303,7 @@ test("role locator matches boolean AX names", async () => {
         ],
       };
     }
-    if (method === "DOM.getBoxModel") {
-      return { model: { content: [10, 20, 30, 20, 30, 60, 10, 60] } };
-    }
-    return {};
+    return pointReply(method, { x: 20, y: 40 }) ?? {};
   });
   const point = await resolveElementCenter(
     cdp,
@@ -327,11 +327,8 @@ test("role locator matches regex AX names", async () => {
         ],
       };
     }
-    if (method === "DOM.getBoxModel") {
-      assert.equal(params.backendNodeId, 100);
-      return { model: { content: [10, 20, 30, 20, 30, 60, 10, 60] } };
-    }
-    return {};
+    if (method === "DOM.resolveNode") assert.equal(params.backendNodeId, 100);
+    return pointReply(method, { x: 20, y: 40 }) ?? {};
   });
   const point = await resolveElementCenter(
     cdp,
@@ -360,11 +357,8 @@ test("internal nth role locator resolves the requested AX match", async () => {
         ],
       };
     }
-    if (method === "DOM.getBoxModel") {
-      assert.equal(params.backendNodeId, 200);
-      return { model: { content: [20, 20, 40, 20, 40, 60, 20, 60] } };
-    }
-    return {};
+    if (method === "DOM.resolveNode") assert.equal(params.backendNodeId, 200);
+    return pointReply(method, { x: 30, y: 40 }) ?? {};
   });
   const point = await resolveElementCenter(
     cdp,
@@ -450,4 +444,74 @@ test("scoped locator center uses the matched descendant", async () => {
     selector,
   );
   assert.deepEqual(point, { x: 30, y: 40, sessionId: undefined });
+});
+
+/** Run the page-side point picker with a fake DOM. */
+function pickPoint(el, elementFromPoint, viewport = { w: 1000, h: 800 }) {
+  const doc = { elementFromPoint };
+  return new Function(
+    "document",
+    "innerWidth",
+    "innerHeight",
+    `return ${POINT_JS}`,
+  )(doc, viewport.w, viewport.h)(el);
+}
+
+test("a link wrapped across two lines is clicked on a fragment, not in the gap", () => {
+  // Union rect of the two line boxes has its centre in the gap between them,
+  // where the parent paragraph is the hit target and the click does nothing.
+  const el = {
+    isConnected: true,
+    contains: (n) => n === el,
+    getClientRects: () => [
+      { x: 700, y: 100, width: 100, height: 20 },
+      { x: 100, y: 130, width: 60, height: 20 },
+    ],
+    getBoundingClientRect: () => ({ x: 100, y: 100, width: 700, height: 50 }),
+  };
+  const paragraph = { tagName: "P", id: "", className: "" };
+  const point = pickPoint(el, (x, y) => {
+    const onFirst = x >= 700 && x <= 800 && y >= 100 && y <= 120;
+    const onSecond = x >= 100 && x <= 160 && y >= 130 && y <= 150;
+    return onFirst || onSecond ? el : paragraph;
+  });
+  assert.deepEqual(point, { x: 750, y: 110 });
+
+  // The old union centre would have been (450, 125): the gap.
+  assert.notDeepEqual(point, { x: 450, y: 125 });
+});
+
+test("an element under an overlay reports what intercepts the click", () => {
+  const el = {
+    isConnected: true,
+    contains: (n) => n === el,
+    getClientRects: () => [{ x: 10, y: 10, width: 100, height: 20 }],
+    getBoundingClientRect: () => ({ x: 10, y: 10, width: 100, height: 20 }),
+  };
+  const overlay = { tagName: "DIV", id: "blocker", className: "modal open" };
+  const point = pickPoint(el, () => overlay);
+  assert.equal(point.intercepted, "div#blocker.modal");
+});
+
+test("a detached element is refused before any click is dispatched", () => {
+  const el = {
+    isConnected: false,
+    contains: () => false,
+    getClientRects: () => [],
+    getBoundingClientRect: () => ({ x: 0, y: 0, width: 0, height: 0 }),
+  };
+  assert.deepEqual(pickPoint(el, () => null), { error: "detached" });
+});
+
+test("a bad selector says what is wrong, not the browser's SyntaxError", () => {
+  assert.match(
+    invalidSelectorMessage("@abc", "SyntaxError: Failed to execute 'querySelectorAll'"),
+    /@abc is not a valid ref.*page\.snapshot\(\)/s,
+  );
+  const css = invalidSelectorMessage(
+    "div[",
+    "SyntaxError: Failed to execute 'querySelectorAll' on 'Document': 'div[' is not a valid selector.",
+  );
+  assert.match(css, /Invalid CSS selector "div\[".*getByRole/s);
+  assert.doesNotMatch(css, /Failed to execute/);
 });

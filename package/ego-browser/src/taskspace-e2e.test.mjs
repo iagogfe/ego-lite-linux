@@ -91,6 +91,9 @@ async function runTaskspaceScript(ego, code) {
       stderr,
       services: { printUpdateBanner() {} },
     });
+    // runMain reports script failures on stderr with exit 1 instead of rejecting;
+    // rethrow so the failure asserts below keep reading like the agent would.
+    if (exitCode !== 0) throw new Error(stderr.text());
     return { exitCode, stdout: stdout.text(), stderr: stderr.text() };
   } finally {
     if (previous === undefined) {

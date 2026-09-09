@@ -12,6 +12,8 @@ export type SnapshotOptions = {
   includeActionMarks?: boolean;
   includeStableLocator?: boolean;
   maxResultLength?: number;
+  /** Snapshot only this node's subtree (Accessibility.queryAXTree). */
+  rootBackendNodeId?: number;
 };
 
 export type SnapshotRef = {
@@ -53,8 +55,16 @@ const INTERESTING_ROLES = new Set([
   "gridcell",
   "columnheader",
   "rowheader",
+  // Chrome emits lowercase AX roles; "Row" alone silently dropped every table
+  // row, which turned a table into a flat run of cells with no boundaries.
+  "row",
   "Row",
+  "rowgroup",
   "table",
+  "list",
+  "code",
+  "figure",
+  "paragraph",
   "listitem",
   "ListItem",
   "article",
@@ -79,7 +89,6 @@ const STRUCTURAL_IF_NAMED = new Set([
   "none",
   "InlineTextBox",
   "LineBreak",
-  "paragraph",
   "LabelText",
   "LegacyLayout",
 ]);
@@ -113,9 +122,13 @@ function nodeBackendId(node: any): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
+/** Bullets and numbers rendered by ::marker: a row nothing can read or act on. */
+const NOISE_ROLES = new Set(["ListMarker"]);
+
 function isInteresting(node: any): boolean {
   if (!node || typeof node !== "object") return false;
   if (node.ignored) return false;
+  if (NOISE_ROLES.has(nodeRole(node))) return false;
 
   const backendNodeId = nodeBackendId(node);
   if (backendNodeId === undefined) return false;
@@ -139,27 +152,74 @@ function isInteresting(node: any): boolean {
   return name.length > 0;
 }
 
+/**
+ * A snapshot row is `@N role "name"`, and for a unique role+name pair that is
+ * already the locator, so no suffix is printed. When several nodes share the
+ * pair, `role:X[name="Y"]` is ambiguous — it throws in strict mode — so the row
+ * carries the disambiguated form instead: `loc=role:X[name="Y"] >> nth=k`.
+ */
 function formatLine(
   refId: number,
   role: string,
   name: string,
   includeActionMarks: boolean,
-  includeStableLocator: boolean,
+  locatorSuffix: string | null,
 ): string {
   const quoted = JSON.stringify(name);
-  let line = includeActionMarks
+  const line = includeActionMarks
     ? `@${refId} ${role} ${quoted}`
     : `${role} ${quoted}`;
-  if (includeStableLocator && role && name) {
-    const loc = `loc=role:${role}[name=${JSON.stringify(name)}]`;
-    line += ` ${loc}`;
-  }
-  return line;
+  return locatorSuffix ? `${line} ${locatorSuffix}` : line;
 }
 
 /**
- * Walk AX nodes; emit compact snapshot lines + sequential refs with backendNodeId.
+ * Index every addressable node by role+name, in the order a role query returns
+ * them, so a row can say which of the duplicates it is. Built over all nodes,
+ * not just printed rows: the resolver counts the ones the snapshot skips too.
  */
+function roleNameIndex(nodes: any[]): Map<string, number[]> {
+  const index = new Map<string, number[]>();
+  for (const node of nodes) {
+    if (!node || node.ignored) continue;
+    const backendNodeId = nodeBackendId(node);
+    if (backendNodeId === undefined) continue;
+    const key = `${nodeRole(node)}\u0000${nodeName(node)}`;
+    const list = index.get(key);
+    if (list) list.push(backendNodeId);
+    else index.set(key, [backendNodeId]);
+  }
+  return index;
+}
+
+/**
+ * Walk AX nodes; emit compact snapshot lines plus their refs.
+ *
+ * The `@N` printed on a line is the node's own backendNodeId — the key the
+ * harness stores the ref map under and the id `DOM.resolveNode` takes. A
+ * separate sequential counter used to be printed instead, so every `@N` either
+ * missed or, on a big page where the two ranges overlap, silently resolved to
+ * a different element.
+ */
+/**
+ * The `loc=` a row needs, or null when role+name already identifies it.
+ * `includeStableLocator` forces the suffix on every row (still disambiguated).
+ */
+function locatorSuffix(
+  index: Map<string, number[]>,
+  role: string,
+  name: string,
+  backendNodeId: number,
+  force: boolean,
+): string | null {
+  const siblings = index.get(`${role}\u0000${name}`) || [];
+  const ambiguous = siblings.length > 1;
+  if (!ambiguous && !force) return null;
+  const base = `loc=role:${role}[name=${JSON.stringify(name)}]`;
+  if (!ambiguous) return base;
+  const nth = siblings.indexOf(backendNodeId);
+  return nth < 0 ? base : `${base} >> nth=${nth}`;
+}
+
 export function axTreeToSnapshot(
   axNodes: any[],
   options: SnapshotOptions = {},
@@ -171,7 +231,8 @@ export function axTreeToSnapshot(
   const nodes = Array.isArray(axNodes) ? axNodes : [];
   const lines: string[] = [];
   const refs: SnapshotRef[] = [];
-  let nextId = 1;
+  const index = roleNameIndex(nodes);
+  let lastName: string | null = null;
 
   for (const node of nodes) {
     if (!isInteresting(node)) continue;
@@ -179,11 +240,22 @@ export function axTreeToSnapshot(
     const role = nodeRole(node) || "unknown";
     const name = nodeName(node);
     const backendNodeId = nodeBackendId(node)!;
-    const id = nextId++;
+    const id = backendNodeId;
+
+    // A StaticText child that only repeats its parent's name adds a row and no
+    // information; the parent row already carries the text and a usable ref.
+    if (role === "StaticText" && name !== "" && name === lastName) continue;
+    lastName = name;
 
     refs.push({ id, backendNodeId, role, name });
     lines.push(
-      formatLine(id, role, name, includeActionMarks, includeStableLocator),
+      formatLine(
+        id,
+        role,
+        name,
+        includeActionMarks,
+        locatorSuffix(index, role, name, backendNodeId, includeStableLocator),
+      ),
     );
   }
 
@@ -201,6 +273,28 @@ export function axTreeToSnapshot(
 }
 
 /**
+ * What to do about an accessibility timeout.
+ *
+ * Measured on this host: Chrome answers accessibility requests for the tab it
+ * has ACTIVE. Selecting a task space does not activate its tab, so a read in a
+ * background tab hangs — `page.snapshot()` dies at the 15s CDP timeout and
+ * `getByRole` takes ~16s, with nothing running in parallel. Activating the tab
+ * first turns the same snapshot into ~650ms. A page stuck in a long task or a
+ * dead renderer produces the same timeout, so this names the usual cause, not
+ * the only one.
+ */
+function timeoutAdvice(detail: string): string {
+  if (!/timeout/i.test(detail) || !/Accessibility\./.test(detail)) return "";
+  return (
+    ". Chrome answers accessibility requests only for its focused tab; the host takes that focus turn for you, so the" +
+    " usual cause left is the page itself — a renderer stuck in a long task, or one that died. Check it with" +
+    " page.info() or a CSS read (neither needs focus), then retry; activating the tab by hand" +
+    " (const [tab] = await browser.listTabs(); await browser.switchTab(tab.targetId)) is the last resort." +
+    " Scoping the snapshot to a region or capping maxResultLength does not help: the whole tree is computed either way."
+  );
+}
+
+/**
  * Fetch full AX tree via CDP and serialize.
  * On any failure throws EGO_SNAPSHOT_FAILED.
  */
@@ -211,12 +305,32 @@ export async function snapshotPage(
 ): Promise<SnapshotResult> {
   try {
     await cdp.send("Accessibility.enable", {}, sessionId);
-    const result = await cdp.send("Accessibility.getFullAXTree", {}, sessionId);
+    let root = options?.rootBackendNodeId;
+    if (!Number.isFinite(root)) {
+      // The whole page is queryAXTree from the document root, not
+      // getFullAXTree: same nodes and same cost, but in document order. The
+      // full tree returns internal tree order, which put late-page rows at the
+      // top of the snapshot and made "the 12th match" mean two different
+      // elements to the snapshot and to the resolver.
+      const doc = await cdp.send("DOM.getDocument", { depth: 0 }, sessionId);
+      root = doc?.root?.backendNodeId;
+    }
+    // Scoping to one node's subtree is the difference between reading the
+    // section you care about and spending the budget on the site menu.
+    const result = Number.isFinite(root)
+      ? await cdp.send(
+          "Accessibility.queryAXTree",
+          { backendNodeId: root },
+          sessionId,
+        )
+      : await cdp.send("Accessibility.getFullAXTree", {}, sessionId);
     const nodes = result?.nodes;
     if (!Array.isArray(nodes)) {
       throw makeEgoError(
         "EGO_SNAPSHOT_FAILED",
-        "Accessibility.getFullAXTree returned no nodes array",
+        root === undefined
+          ? "Accessibility.getFullAXTree returned no nodes array"
+          : `Accessibility.queryAXTree returned no nodes array for backendNodeId ${root}`,
       );
     }
     return axTreeToSnapshot(nodes, options);
@@ -234,6 +348,9 @@ export async function snapshotPage(
         : typeof err === "string"
           ? err
           : String(err);
-    throw makeEgoError("EGO_SNAPSHOT_FAILED", `Snapshot failed: ${detail}`);
+    throw makeEgoError(
+      "EGO_SNAPSHOT_FAILED",
+      `Snapshot failed: ${detail}${timeoutAdvice(detail)}`,
+    );
   }
 }

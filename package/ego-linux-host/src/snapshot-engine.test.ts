@@ -106,7 +106,9 @@ test("content line format includes role and quoted name", async () => {
   assert.match(snap.content, /@\d+ textbox "Email"/);
 });
 
-test("refs allocate sequential ids starting at 1", async () => {
+test("every @N on a line is that node's backendNodeId", async () => {
+  // The printed ref is the key the harness resolves with (DOM.resolveNode).
+  // A separate counter used to be printed, so refs missed or hit the wrong node.
   const ax = JSON.parse(
     await readFile(
       new URL("./fixtures/ax-tree-minimal.json", import.meta.url),
@@ -114,12 +116,82 @@ test("refs allocate sequential ids starting at 1", async () => {
     ),
   );
   const snap = axTreeToSnapshot(ax.nodes, { includeActionMarks: true });
-  assert.equal(snap.refs[0].id, 1);
+  const printed = snap.content
+    .split("\n")
+    .map((line) => Number(/^@(\d+) /.exec(line)?.[1]));
+  assert.equal(printed.length, snap.refs.length);
   for (let i = 0; i < snap.refs.length; i++) {
-    assert.equal(snap.refs[i].id, i + 1);
-    assert.equal(typeof snap.refs[i].backendNodeId, "number");
+    assert.equal(printed[i], snap.refs[i].backendNodeId);
+    assert.equal(snap.refs[i].id, snap.refs[i].backendNodeId);
     assert.ok(snap.refs[i].role);
   }
+  // Refs are unique, so a @N can never address two nodes.
+  assert.equal(new Set(printed).size, printed.length);
+});
+
+test("a row is the locator: no duplicated loc= suffix, no echo rows", () => {
+  // The suffix used to repeat the row's own role and name, 54% of the bytes.
+  const nodes = [
+    { role: { value: "heading" }, name: { value: "Security" }, backendDOMNodeId: 1 },
+    { role: { value: "StaticText" }, name: { value: "Security" }, backendDOMNodeId: 2 },
+    { role: { value: "ListMarker" }, name: { value: "\u2022 " }, backendDOMNodeId: 3 },
+    { role: { value: "link" }, name: { value: "Kernel" }, backendDOMNodeId: 4 },
+  ];
+  const bare = axTreeToSnapshot(nodes, { includeActionMarks: true });
+  assert.deepEqual(bare.content.split("\n"), [
+    '@1 heading "Security"',
+    '@4 link "Kernel"',
+  ]);
+
+  // The suffix is still available for a caller that asks for it.
+  const withLoc = axTreeToSnapshot(nodes, {
+    includeActionMarks: true,
+    includeStableLocator: true,
+  });
+  assert.match(withLoc.content, /@1 heading "Security" loc=role:heading\[name="Security"\]/);
+});
+
+test("an ambiguous role+name row carries the disambiguated locator", () => {
+  const nodes = [
+    { role: { value: "link" }, name: { value: "Jump up" }, backendDOMNodeId: 10 },
+    { role: { value: "link" }, name: { value: "Kernel" }, backendDOMNodeId: 11 },
+    { role: { value: "link" }, name: { value: "Jump up" }, backendDOMNodeId: 12 },
+    { role: { value: "table" }, name: { value: "" }, backendDOMNodeId: 13 },
+    { role: { value: "table" }, name: { value: "" }, backendDOMNodeId: 14 },
+  ];
+  const snap = axTreeToSnapshot(nodes, { includeActionMarks: true });
+  assert.deepEqual(snap.content.split("\n"), [
+    '@10 link "Jump up" loc=role:link[name="Jump up"] >> nth=0',
+    '@11 link "Kernel"',
+    '@12 link "Jump up" loc=role:link[name="Jump up"] >> nth=1',
+    '@13 table "" loc=role:table[name=""] >> nth=0',
+    '@14 table "" loc=role:table[name=""] >> nth=1',
+  ]);
+  // Every emitted locator is unique: no two rows can claim the same one.
+  const emitted = snap.content
+    .split("\n")
+    .map((line) => line.split(" loc=")[1])
+    .filter(Boolean);
+  assert.equal(new Set(emitted).size, emitted.length);
+});
+
+test("structural rows survive even without a name", () => {
+  // Chrome emits lowercase roles; matching only "Row" dropped every table row,
+  // which left a table as a flat run of cells with no boundaries.
+  const nodes = [
+    { role: { value: "row" }, name: { value: "" }, backendDOMNodeId: 1 },
+    { role: { value: "cell" }, name: { value: "a" }, backendDOMNodeId: 2 },
+    { role: { value: "list" }, name: { value: "" }, backendDOMNodeId: 3 },
+    { role: { value: "paragraph" }, name: { value: "" }, backendDOMNodeId: 4 },
+    { role: { value: "code" }, name: { value: "" }, backendDOMNodeId: 5 },
+    { role: { value: "figure" }, name: { value: "" }, backendDOMNodeId: 6 },
+    { role: { value: "generic" }, name: { value: "" }, backendDOMNodeId: 7 },
+  ];
+  const snap = axTreeToSnapshot(nodes, { includeActionMarks: true });
+  assert.deepEqual(
+    snap.content.split("\n").map((line) => line.split(" ")[1]),
+    ["row", "cell", "list", "paragraph", "code", "figure"],
+  );
 });
 
 test("snapshotPage enables AX, fetches tree, returns snapshot", async () => {
@@ -150,6 +222,60 @@ test("snapshotPage enables AX, fetches tree, returns snapshot", async () => {
     .map((t) => JSON.parse(t))
     .find((m) => m.method === "Accessibility.getFullAXTree");
   assert.equal(treeCall.sessionId, "sess-1");
+});
+
+test("snapshotPage scoped to a node reads only that subtree", async () => {
+  const ax = JSON.parse(
+    await readFile(
+      new URL("./fixtures/ax-tree-minimal.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  const transport = mockTransport();
+  transport.autoReply((msg) => {
+    if (msg.method === "Accessibility.queryAXTree") {
+      return { id: msg.id, result: { nodes: ax.nodes.slice(0, 2) } };
+    }
+    if (msg.method === "Accessibility.getFullAXTree") {
+      throw new Error("a scoped snapshot must not fetch the whole tree");
+    }
+    return { id: msg.id, result: {} };
+  });
+  const cdp = createCdpBridge(transport);
+  const snap = await snapshotPage(cdp, "sess-1", {
+    includeActionMarks: true,
+    rootBackendNodeId: 77,
+  });
+  const query = transport.sent
+    .map((t) => JSON.parse(t))
+    .find((m) => m.method === "Accessibility.queryAXTree");
+  assert.equal(query.params.backendNodeId, 77);
+  assert.ok(snap.refs.length > 0);
+  assert.ok(snap.refs.length <= 2);
+});
+
+test("an accessibility timeout says what it usually means and what to do", async () => {
+  const transport = mockTransport();
+  transport.autoReply((msg) => {
+    if (msg.method === "Accessibility.enable") return { id: msg.id, result: {} };
+    if (msg.method === "DOM.getDocument") {
+      return { id: msg.id, result: { root: { backendNodeId: 1 } } };
+    }
+    throw new Error("CDP timeout after 15000ms: Accessibility.queryAXTree");
+  });
+  const cdp = createCdpBridge(transport);
+  await assert.rejects(
+    () => snapshotPage(cdp, "sess-1", {}),
+    (error: any) => {
+      assert.equal(error.error_code, "EGO_SNAPSHOT_FAILED");
+      assert.match(error.message, /CDP timeout after 15000ms/);
+      assert.match(error.message, /only for its focused tab/);
+      assert.match(error.message, /renderer stuck in a long task/);
+      // The advice must not sell a mitigation that was measured not to work.
+      assert.match(error.message, /does not help/);
+      return true;
+    },
+  );
 });
 
 test("snapshotPage throws EGO_SNAPSHOT_FAILED on CDP failure", async () => {

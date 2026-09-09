@@ -378,3 +378,18 @@ test("click absorbs CDP timeout when probe fallback succeeds", async () => {
     "probe install and finish were called despite CDP timeout",
   );
 });
+
+test("click fails loud with the timeout when the target never becomes visible", async () => {
+  const restore = setOverrides({
+    // Runtime.evaluate returns no objectId: the element does not exist.
+    cdpOverride: async () => ({ result: {} }),
+  });
+  try {
+    await assert.rejects(
+      () => click("#missing", { timeout: 50 }),
+      /No element matches #missing after waiting 50ms \(waiting for it to be visible\)/,
+    );
+  } finally {
+    restore();
+  }
+});

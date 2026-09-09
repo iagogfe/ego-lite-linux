@@ -181,11 +181,70 @@ test("an uncaught hard stop discards output without double-printing the message"
     ego,
   );
 
-  // The thrown Error already surfaces the message (the host prints it), so the sink
-  // discards the buffer and stays silent rather than printing the guidance a second time.
-  assert.ok(result.error, "expected runMain to reject");
-  assert.match(result.error.message, /taken control of this task space/);
+  // runMain reports the thrown Error on stderr, so the sink discards the buffer and
+  // stays silent rather than printing the guidance a second time.
+  assert.equal(result.exitCode, 1);
+  assert.match(result.stderr, /^ego-browser: .*taken control of this task space/);
   assert.equal(result.stdout, "");
+});
+
+test("a helper error without a tab is one actionable line, no stack", async () => {
+  const result = await runScript(`console.log(await page.info())`, {
+    listTabs: async () => ({ tabs: [] }),
+    sendCDPMessage() {},
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(
+    result.stderr,
+    "ego-browser: no active tab — call taskSpaces.useOrCreate(name) and browser.openOrReuseTab(url) first\n",
+  );
+});
+
+test("script errors report the heredoc line, including inside nested functions", async () => {
+  const top = await runScript(`nope()`);
+  assert.equal(top.exitCode, 1);
+  assert.equal(top.stderr, "ReferenceError: nope is not defined\n    at <anonymous_script>:1:1\n");
+
+  const nested = await runScript(
+    `async function inner() { throw new TypeError("nested boom") }\nawait inner()`,
+  );
+  assert.equal(nested.exitCode, 1);
+  assert.match(
+    nested.stderr,
+    /^TypeError: nested boom\n    at inner \(<anonymous_script>:1:\d+\)\n    at <anonymous_script>:2:\d+\n$/,
+  );
+});
+
+test("an unawaited rejection is reported like a script error and keeps partial output", async () => {
+  // node --test owns unhandledRejection in-process, so exercise the real CLI.
+  const { spawnSync } = await import("node:child_process");
+  const result = spawnSync(process.execPath, ["dist/out/index.js"], {
+    input: `
+      console.log("partial");
+      Promise.reject(new Error("x"));
+      await new Promise((r) => setTimeout(r, 50));
+      console.log("never");
+    `,
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, "partial\n");
+  assert.match(result.stderr, /^Error: x\n    at <anonymous_script>:3:\d+\n$/);
+});
+
+test("a syntax error reports the agent's own line, not the wrapper's token", async () => {
+  const unclosed = await runScript(`const a = (\nconsole.log("x")\n`);
+  assert.equal(unclosed.exitCode, 1);
+  assert.equal(
+    unclosed.stderr,
+    "SyntaxError: Unexpected end of input: a bracket, parenthesis, or quote is left open\n    at <anonymous_script>:2\n",
+  );
+
+  const stray = await runScript(`console.log("a")\n}\nconsole.log("b")`);
+  assert.equal(stray.exitCode, 1);
+  assert.match(stray.stderr, /^SyntaxError: .*\n    at <anonymous_script>:3\n$/);
+  assert.doesNotMatch(stray.stderr, /Node\.js v|run\.js/);
 });
 
 test("an ordinary uncaught error still flushes the output logged before it", async () => {
@@ -194,8 +253,9 @@ test("an ordinary uncaught error still flushes the output logged before it", asy
     throw new Error("boom");
   `);
 
-  assert.ok(result.error, "expected runMain to reject");
-  assert.equal(result.error.message, "boom");
+  assert.equal(result.exitCode, 1);
+  assert.match(result.stderr, /^Error: boom\n    at <anonymous_script>:\d+:\d+\n$/);
+  assert.doesNotMatch(result.stderr, /run\.js|node:internal/);
   assert.equal(result.stdout, "partial result\n");
 });
 
@@ -204,12 +264,11 @@ test("an uncaught legacy task-space helper reports a stale skill instead of a Re
     await useOrCreateTaskSpace("checkout-flow");
   `);
 
-  assert.ok(result.error, "expected runMain to reject");
-  assert.equal(result.error.name, "EgoBrowserSkillStaleError");
-  assert.match(result.error.message, /^\[ego-browser:skill-stale\]/);
-  assert.match(result.error.message, /useOrCreateTaskSpace/);
-  assert.match(result.error.message, /taskSpaces\.useOrCreate/);
-  assert.doesNotMatch(result.error.message, /is not defined/);
+  assert.equal(result.exitCode, 1);
+  assert.match(result.stderr, /^ego-browser: \[ego-browser:skill-stale\]/);
+  assert.match(result.stderr, /useOrCreateTaskSpace/);
+  assert.match(result.stderr, /taskSpaces\.useOrCreate/);
+  assert.doesNotMatch(result.stderr, /is not defined/);
   assert.equal(result.stdout, "");
 });
 
