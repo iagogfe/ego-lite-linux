@@ -5,11 +5,12 @@
 [![CI](https://github.com/iagogfe/ego-lite-linux/actions/workflows/ci.yml/badge.svg)](https://github.com/iagogfe/ego-lite-linux/actions/workflows/ci.yml)
 [![Security](https://github.com/iagogfe/ego-lite-linux/actions/workflows/security.yml/badge.svg)](https://github.com/iagogfe/ego-lite-linux/actions/workflows/security.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/iagogfe/ego-lite-linux/badge)](https://scorecard.dev/viewer/?uri=github.com/iagogfe/ego-lite-linux)
+[![Release](https://img.shields.io/github/v/release/iagogfe/ego-lite-linux)](https://github.com/iagogfe/ego-lite-linux/releases/latest)
 [![License](https://img.shields.io/github/license/iagogfe/ego-lite-linux)](LICENSE)
 
 An unofficial Linux/WSL host for [ego lite](https://github.com/citrolabs/ego-lite), the browser where you and your AI agents work in parallel.
 
-ego lite ships as a macOS app. This repository keeps the upstream `ego-browser` skill and harness intact and adds `package/ego-linux-host`: a long-lived Chromium supervisor plus a CLI shim, so agents can run the same `ego-browser` heredocs against a shared browser on stock Chromium.
+ego lite ships as a macOS app. This repository uses the upstream `ego-browser` skill and harness as its base and adds `package/ego-linux-host`. It carries fork-specific behavior on both sides of that line: a focus scheduler so concurrent agents stop blocking each other, task spaces selected per connection, the snapshot ref and locator contract, frozen-tab diagnosis, and tab reuse by origin.
 
 > Not affiliated with CitroLabs. This is a community port that approximates the ego product model on Linux — it is **not** the ego lite app, and it does not replace it on macOS.
 
@@ -17,7 +18,7 @@ ego lite ships as a macOS app. This repository keeps the upstream `ego-browser` 
 
 | | |
 |---|---|
-| **Same agent interface** | Agents keep writing `ego-browser` JavaScript heredocs — snapshot, click, fill, wait, navigate, capture. No new API to learn. |
+| **Same agent interface** | Agents keep writing `ego-browser` JavaScript heredocs — snapshot, click, fill, wait, goto, screenshot. No new API to learn. |
 | **One shared browser** | A daemon supervises a single Chromium with your profile, so logins carry over instead of living in a throwaway automation profile. |
 | **Task Spaces on stock Chromium** | Spaces are modelled as tab sets with ownership, so an agent's tabs stay separate from yours, and you can take a Space over mid-task. |
 | **CDP only** | No kernel patches, no forked browser build. Chrome or Chromium from your distro is enough. |
@@ -54,11 +55,13 @@ Point your agent CLI at the task in plain language, same as upstream:
 ego-browser open example.com and tell me the page title
 ```
 
-The agent picks up the `ego-browser` skill, opens the page in its own Space, reads a Snapshot, acts on the page, and reports back, while your own tabs stay untouched.
+The agent picks up the `ego-browser` skill, reuses an existing agent-owned tab from the same origin when possible, and creates a new tab only when no reusable tab exists. It reads a Snapshot, acts on the page, and reports back while your own tabs stay untouched.
 
 ## Status
 
-MVP. The daemon, CDP bridge, Task Spaces, CLI shim, doctor diagnostics, stale-socket recovery, and Chrome respawn all work, and the manual acceptance checklist passes on headed Linux Chrome. Treat it as early software: the surface is smaller than the macOS app, and profile seeding is not implemented yet because copying a live Chrome profile can corrupt it.
+Current release: [v0.2.0](https://github.com/iagogfe/ego-lite-linux/releases/latest). Changes per version are in [CHANGELOG.md](CHANGELOG.md).
+
+MVP. The daemon, CDP bridge, Task Spaces, CLI shim, doctor diagnostics, stale-socket recovery, and Chrome respawn all work, and the manual acceptance checklist passes on headed Linux Chrome. Two agents on the same site each stay in their own Space, a reader no longer stalls while another client opens tabs, and a client whose own renderer freezes is told so in about 300ms instead of waiting out a timeout. Treat it as early software: the surface is smaller than the macOS app, and profile seeding is not implemented yet because copying a live Chrome profile can corrupt it.
 
 Details and internals: [`package/ego-linux-host/README.md`](package/ego-linux-host/README.md).
 Design spec: [`docs/superpowers/specs/2026-07-23-ego-linux-host-design.md`](docs/superpowers/specs/2026-07-23-ego-linux-host-design.md).
@@ -72,16 +75,19 @@ Design spec: [`docs/superpowers/specs/2026-07-23-ego-linux-host-design.md`](docs
 | Snapshot quality | kernel-level customization | accessibility tree over CDP |
 | Distribution | download + `npx skills add citrolabs/ego-lite` | clone + `install-linux.sh` |
 
-Everything under `package/ego-browser` and `skills/ego-browser` tracks upstream, minus the workflow that publishes the skill (and its guard test) — this fork publishes nothing. The Linux-specific work lives in `package/ego-linux-host` and `skills/ego-browser/scripts/install-linux.sh`.
+The `package/ego-browser` and `skills/ego-browser` directories started from upstream and include changes maintained by this fork, including tab reuse and Linux integration. The Linux-specific host and installer live in `package/ego-linux-host` and `skills/ego-browser/scripts/install-linux.sh`; this fork publishes no npm packages.
 
 ## Development
 
 ```bash
-cd package/ego-linux-host
-npm ci
-npm test        # build + typecheck + node --test, Chrome-free
+cd package/ego-browser && npm ci     # also installs the git hooks
+cd ../ego-linux-host && npm ci
+
+npm test             # build + typecheck + node --test, Chrome-free
 ./scripts/smoke.sh   # end-to-end, needs Chrome + a display (or EGO_HEADLESS=1)
 ```
+
+Install `package/ego-browser` even when you only touch the host. Its `prepare` script is what installs the lefthook hooks, and every pre-commit job runs binaries out of its `node_modules`. Skip it and the first commit touching `package/ego-browser/` dies on `Cannot find package 'esbuild'` and `prettier: not found`.
 
 CI runs the `package/ego-browser` and `package/ego-linux-host` suites on every push and pull request. See [CONTRIBUTING.md](CONTRIBUTING.md).
 

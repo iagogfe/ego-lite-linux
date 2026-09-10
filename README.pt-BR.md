@@ -4,7 +4,7 @@
 
 Host não-oficial de Linux/WSL para o [ego lite](https://github.com/citrolabs/ego-lite), o navegador em que você e seus agentes de IA trabalham em paralelo.
 
-O ego lite é distribuído como app de macOS. Este repositório mantém a skill e o harness `ego-browser` do upstream intactos e acrescenta o `package/ego-linux-host`: um supervisor de Chromium de vida longa mais um shim de CLI, para que agentes rodem os mesmos heredocs `ego-browser` contra um navegador compartilhado no Chromium padrão.
+O ego lite é distribuído como app de macOS. Este repositório usa a skill e o harness `ego-browser` do upstream como base e acrescenta o `package/ego-linux-host`. Ele carrega comportamentos próprios do fork dos dois lados dessa linha: um escalonador de foco para que agentes simultâneos parem de travar uns aos outros, task space escolhido por conexão, o contrato de ref e locator do snapshot, o diagnóstico de aba congelada e o reuso de aba por origem.
 
 > Sem vínculo com a CitroLabs. Este é um port de comunidade que aproxima o modelo do produto ego no Linux — **não** é o app ego lite, nem o substitui no macOS.
 
@@ -12,7 +12,7 @@ O ego lite é distribuído como app de macOS. Este repositório mantém a skill 
 
 | | |
 |---|---|
-| **Mesma interface de agente** | O agente continua escrevendo heredocs JavaScript do `ego-browser` — snapshot, click, fill, wait, navigate, capture. Nenhuma API nova. |
+| **Mesma interface de agente** | O agente continua escrevendo heredocs JavaScript do `ego-browser` — snapshot, click, fill, wait, goto, screenshot. Nenhuma API nova. |
 | **Um navegador compartilhado** | Um daemon supervisiona um único Chromium com o seu perfil, então os logins vêm junto em vez de ficarem num perfil descartável de automação. |
 | **Task Spaces no Chromium padrão** | Spaces são modelados como conjuntos de abas com dono, então as abas do agente ficam separadas das suas e você pode assumir um Space no meio da tarefa. |
 | **Só CDP** | Sem patch de kernel, sem build de navegador forkado. O Chrome ou Chromium da sua distro basta. |
@@ -49,11 +49,13 @@ Descreva a tarefa em linguagem natural pro seu CLI de agente, igual ao upstream:
 ego-browser abre example.com e me diz o título da página
 ```
 
-O agente carrega a skill `ego-browser`, abre a página no Space dele, lê um Snapshot, age na página e reporta de volta — enquanto suas abas ficam intocadas.
+O agente carrega a skill `ego-browser`, reusa uma aba do agente na mesma origem quando possível e só cria uma aba nova quando não existe uma aba reutilizável. Depois lê um Snapshot, age na página e reporta de volta, enquanto suas abas ficam intocadas.
 
 ## Status
 
-MVP. Daemon, ponte CDP, Task Spaces, shim de CLI, diagnóstico `--doctor`, recuperação de socket órfão e respawn do Chrome funcionam, e o checklist manual de aceitação passa no Chrome headed em Linux. Trate como software novo: a superfície é menor que a do app de macOS, e o seed de perfil ainda não é implementado porque copiar um perfil de Chrome em uso pode corrompê-lo.
+Release atual: [v0.2.0](https://github.com/iagogfe/ego-lite-linux/releases/latest). As mudanças de cada versão estão no [CHANGELOG.md](CHANGELOG.md).
+
+MVP. Daemon, ponte CDP, Task Spaces, shim de CLI, diagnóstico `--doctor`, recuperação de socket órfão e respawn do Chrome funcionam, e o checklist manual de aceitação passa no Chrome headed em Linux. Dois agentes no mesmo site ficam cada um no seu Space, um leitor não trava mais enquanto outro cliente abre abas, e o cliente cujo próprio renderer congela é avisado em cerca de 300ms em vez de esperar o timeout estourar. Trate como software novo: a superfície é menor que a do app de macOS, e o seed de perfil ainda não é implementado porque copiar um perfil de Chrome em uso pode corrompê-lo.
 
 Detalhes e internals: [`package/ego-linux-host/README.md`](package/ego-linux-host/README.md).
 Spec de design: [`docs/superpowers/specs/2026-07-23-ego-linux-host-design.md`](docs/superpowers/specs/2026-07-23-ego-linux-host-design.md).
@@ -67,16 +69,19 @@ Spec de design: [`docs/superpowers/specs/2026-07-23-ego-linux-host-design.md`](d
 | Qualidade do Snapshot | customização em nível de kernel | árvore de acessibilidade via CDP |
 | Distribuição | download + `npx skills add citrolabs/ego-lite` | clone + `install-linux.sh` |
 
-Tudo em `package/ego-browser` e `skills/ego-browser` acompanha o upstream. O trabalho específico de Linux está em `package/ego-linux-host` e `skills/ego-browser/scripts/install-linux.sh`.
+Os diretórios `package/ego-browser` e `skills/ego-browser` começaram no upstream e incluem mudanças mantidas por este fork, como o reuso de abas e a integração com Linux. O host e o instalador específicos de Linux estão em `package/ego-linux-host` e `skills/ego-browser/scripts/install-linux.sh`; este fork não publica pacotes npm.
 
 ## Desenvolvimento
 
 ```bash
-cd package/ego-linux-host
-npm ci
-npm test        # build + typecheck + node --test, sem Chrome
+cd package/ego-browser && npm ci     # instala também os hooks de git
+cd ../ego-linux-host && npm ci
+
+npm test             # build + typecheck + node --test, sem Chrome
 ./scripts/smoke.sh   # ponta a ponta, precisa de Chrome + display (ou EGO_HEADLESS=1)
 ```
+
+Instale o `package/ego-browser` mesmo que você só vá mexer no host. É o `prepare` dele que instala os hooks do lefthook, e todo job de pre-commit roda binário de dentro do `node_modules` dele. Sem isso, o primeiro commit que tocar em `package/ego-browser/` morre em `Cannot find package 'esbuild'` e `prettier: not found`.
 
 O CI roda as suítes de `package/ego-browser` e `package/ego-linux-host` em todo push e pull request. Veja o [CONTRIBUTING.md](CONTRIBUTING.md).
 
