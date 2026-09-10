@@ -1,8 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { Script } from "node:vm";
 import { setTimeout as delay } from "node:timers/promises";
 import type { CdpBridge, CdpPageTarget } from "./cdp-bridge.js";
-import { actionLabel, createEgoRuntime } from "./ego-runtime.js";
+import {
+  AGENT_OVERLAY_JS,
+  actionLabel,
+  createEgoRuntime,
+} from "./ego-runtime.js";
 import { SpaceManager } from "./space-manager.js";
 
 type FakeCdp = CdpBridge & {
@@ -1096,6 +1101,14 @@ test("handle accepts ego. prefix methods", async () => {
   sm.use(a.id);
   const result = await runtime.handle("ego.listTabs", {});
   assert.deepEqual(result.tabs, []);
+});
+
+test("o script do overlay compila e fala portugues no estado parado", () => {
+  // O overlay e uma string injetada na pagina. Um erro de sintaxe nela so
+  // apareceria como overlay que nunca pinta, porque injectOverlay engole tudo.
+  assert.doesNotThrow(() => new Script(AGENT_OVERLAY_JS));
+  assert.match(AGENT_OVERLAY_JS, /parado há /);
+  assert.doesNotMatch(AGENT_OVERLAY_JS, /parado ha /);
 });
 
 test("agent overlay methods evaluate script on the active session", async () => {
