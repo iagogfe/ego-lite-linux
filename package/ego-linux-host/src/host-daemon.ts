@@ -7,7 +7,13 @@
  */
 
 import { createServer, type Server, type Socket } from "node:net";
-import { appendFileSync, existsSync, statSync, truncateSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  readFileSync,
+  statSync,
+  truncateSync,
+} from "node:fs";
 import { mkdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { pingSocket } from "./ego-client.js";
@@ -33,7 +39,12 @@ import {
 } from "./rpc.js";
 import { SpaceManager } from "./space-manager.js";
 
-export const HOST_VERSION = "0.1.0";
+// Read rather than hardcode: this is what --doctor, the client handshake and
+// the status payload report, and a literal only stays right while someone
+// remembers to bump it. Nobody did for 0.2.0, which shipped reporting 0.1.0.
+export const HOST_VERSION: string = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+).version;
 
 const BROWSER_SHUTDOWN_TIMEOUT_MS = 3000;
 const BROWSER_SHUTDOWN_POLL_MS = 25;
