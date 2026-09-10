@@ -5,6 +5,10 @@ not been tagged yet.
 
 ## [Unreleased]
 
+### Fixed
+
+- Report the package version from `--doctor`, the client handshake and the status payload, instead of a literal that stayed at 0.1.0 through the 0.2.0 release.
+
 ## [0.2.0] - 2026-09-10
 
 ### Added

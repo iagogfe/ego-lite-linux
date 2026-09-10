@@ -14,6 +14,14 @@ import type { HostConfig } from "./config.js";
 import type { CdpBridge } from "./cdp-bridge.js";
 import { SpaceManager } from "./space-manager.js";
 
+test("HOST_VERSION is the package version, not a stale literal", () => {
+  // Reading package.json here would only prove the file parses twice. What is
+  // worth catching is the read resolving to the wrong file or to nothing: both
+  // leave `version` undefined, and neither shows up until a user reads
+  // --doctor. 0.2.0 shipped reporting 0.1.0 because the value was a literal.
+  assert.match(HOST_VERSION, /^\d+\.\d+\.\d+/);
+});
+
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), "ego-host-daemon-"));
   try {
