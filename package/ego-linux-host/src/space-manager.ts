@@ -431,6 +431,22 @@ export class SpaceManager {
     );
   }
 
+  /**
+   * Same question asked about one tab instead of the current selection.
+   * The overlay's idle repaint fires after its client disconnected, when there
+   * is no selection left to ask about: the selection-based check then reports
+   * the user space and blocks a paint that was always meant for an agent tab.
+   */
+  isPageControlBlockedForTarget(targetId: string): boolean {
+    const id = this.spaceIdForTarget(targetId);
+    if (id === null) return true;
+    const space = this.findSpace(id);
+    if (!space) return true;
+    return (
+      space.ownership === "user" || space.ownership === "agentDelegatedToUser"
+    );
+  }
+
   assignTarget(targetId: string, spaceId?: number): void {
     const destId = spaceId ?? this.currentSelection();
     if (destId === null || destId === undefined) {

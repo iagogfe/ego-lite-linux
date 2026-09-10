@@ -1290,12 +1290,24 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
    * cursor ring). Cosmetic only: any failure (no tab, navigation in flight,
    * user control) is swallowed — it must never break an agent action.
    */
-  async function injectOverlay(call: string): Promise<{ ok: true }> {
+  async function injectOverlay(
+    call: string,
+    targetId?: string | null,
+  ): Promise<{ ok: true }> {
     try {
-      if (deps.spaceManager.isPageControlBlocked()) return { ok: true };
+      // With an explicit tab, ask about that tab. The selection-based check
+      // answers about whatever is selected now, which after the client
+      // disconnected is the user space — it blocked the idle repaint the
+      // overlay owes an agent tab.
+      const blocked = targetId
+        ? deps.spaceManager.isPageControlBlockedForTarget(targetId)
+        : deps.spaceManager.isPageControlBlocked();
+      if (blocked) return { ok: true };
       // Painting a badge must never steal focus: another client may be
       // mid-read, and its read dies the moment a different tab is focused.
-      const sessionId = await ensureActiveSession(false);
+      const sessionId = targetId
+        ? await deps.getCdp().attach(targetId)
+        : await ensureActiveSession(false);
       await deps.getCdp().send(
         "Runtime.evaluate",
         {
@@ -1324,11 +1336,20 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
   let pendingLabel: string | null = null;
   let labelTimer: ReturnType<typeof setTimeout> | undefined;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  let overlayTargetId: string | null = null;
 
   function paintLabel(label: string): void {
     shownLabel = label;
     lastMark = Date.now();
     holdUntil = lastMark + labelHoldMs;
+    // Record the tab while the client's async scope still resolves it. The
+    // idle repaint runs seconds later, outside that scope and normally after
+    // the ego-browser process exited, when there is no selection to resolve.
+    // ponytail: one shared timer and one remembered tab, like the label state
+    // above it. Two clients painting at once leave the older tab on its last
+    // active label; make this per-target if that ever matters.
+    overlayTargetId =
+      deps.spaceManager.activeTargetForSelected() ?? overlayTargetId;
     void injectOverlay(`setState("active",${JSON.stringify(label)})`);
   }
 
@@ -1368,7 +1389,7 @@ export function createEgoRuntime(deps: EgoRuntimeDeps): EgoRuntime {
     idleTimer = setTimeout(() => {
       shownLabel = "";
       pendingLabel = null;
-      void injectOverlay('setState("idle","")');
+      void injectOverlay('setState("idle","")', overlayTargetId);
     }, idleAfterMs);
     // Never hold the daemon open just to dim a frame.
     idleTimer.unref?.();
