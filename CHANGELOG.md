@@ -5,6 +5,10 @@ not been tagged yet.
 
 ## [Unreleased]
 
+### Changed
+
+- Redesign the agent overlay around the ego mark: a chip whose disc spins while the agent acts and rests on the logo when it stops, and a frame drawn by two strokes that leave the chip and run down both sides of the tab. The idle label now reads "parado há", with the accent it was missing.
+
 ### Fixed
 
 - Drop the agent overlay to its idle state after the client disconnects, instead of leaving the tab claiming an agent is working on it.

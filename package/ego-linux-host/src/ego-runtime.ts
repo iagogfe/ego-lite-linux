@@ -154,98 +154,186 @@ type ReusableTab = {
  * In-page agent overlay with two states, so a glance at the tab answers three
  * questions: is the agent acting now, is this its tab, and did it stop.
  *
- * - `active`: thick pulsing frame, badge with the current action, cursor ring.
- * - `idle`: thin static frame, grey badge counting since the last action.
- *   It never disappears — a cleared overlay is indistinguishable from a tab
- *   the agent never touched.
+ * - `active`: two strokes leave the chip, run down both sides of the viewport,
+ *   meet at the bottom and erase in the same order; the ego mark in the chip
+ *   spins like the disc in the logo; the label names the current action.
+ * - `idle`: a still hairline frame, the mark stops on the logo's own three
+ *   phases, and the label counts since the last action. It never disappears —
+ *   a cleared overlay is indistinguishable from a tab the agent never touched.
+ *
+ * Both roots are custom elements with `all:initial` and a shadow root, so the
+ * page's own CSS cannot reach them: example.com's `div { opacity: .8 }` turned
+ * the chip grey, and an icon library's `svg { width: 1em }` would shrink the
+ * whole frame. The frame and cursor ring sit in their own root with
+ * mix-blend-mode:difference, which inverts whatever is behind them so they
+ * read on light and dark pages alike; blending only reaches the page from the
+ * root of a stacking context, so they cannot share the chip's solid root.
  *
  * Idempotent: safe to re-evaluate on every call (re-injects after navigation).
  * Coordinates are viewport CSS px (same space as Input.dispatchMouseEvent).
  */
-const AGENT_OVERLAY_JS = `(() => {
+export const AGENT_OVERLAY_JS = `(() => {
   if (globalThis.__egoAgentOverlay) return;
   const ID = "__ego_agent_overlay";
+  const FRAME_ID = "__ego_agent_frame";
+  const NS = "http://www.w3.org/2000/svg";
+  // Tres fases de um disco girando, como no logo: circulo, lente e fatia.
+  const PHASES = [1, 0.5, 0.24];
+  const SPIN_DELAYS = [0, -0.42, -0.58];
+  // Keyframes moram dentro de cada shadow root: nomes la dentro nao colidem
+  // com a pagina e a pagina nao os alcanca.
+  const KEYFRAMES =
+    "@keyframes turn{0%,100%{transform:scaleX(1)}50%{transform:scaleX(.06)}}" +
+    "@keyframes draw{0%{stroke-dashoffset:100}45%,58%{stroke-dashoffset:0}" +
+    "100%{stroke-dashoffset:-100}}" +
+    "@keyframes enter{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}";
   let idleSince = 0;
   let clock;
+  let resizeBound = false;
+  function el(tag, css) {
+    const node = document.createElement(tag);
+    if (css) node.style.cssText = css;
+    return node;
+  }
+  function svg(tag, attrs, css) {
+    const node = document.createElementNS(NS, tag);
+    for (const k in attrs) node.setAttribute(k, attrs[k]);
+    if (css) node.style.cssText = css;
+    return node;
+  }
+  /** Raiz fora do alcance do CSS da pagina: tag propria, all:initial e shadow. */
+  function host(tag, id, css) {
+    const node = document.createElement(tag);
+    node.id = id;
+    node.setAttribute("aria-hidden", "true");
+    node.style.cssText = "all:initial;" + css;
+    const style = el("style");
+    style.textContent = KEYFRAMES;
+    node.attachShadow({ mode: "open" }).append(style);
+    (document.body || document.documentElement).appendChild(node);
+    return node;
+  }
+  /** Os tracos seguem o tamanho da janela, entao sao refeitos a cada resize. */
+  function layout() {
+    const frame = document.getElementById(FRAME_ID);
+    if (!frame || !frame.shadowRoot) return;
+    const scope = frame.shadowRoot;
+    const W = innerWidth, H = innerHeight, m = W / 2;
+    const base = scope.querySelector("rect");
+    const [left, right] = scope.querySelectorAll("path");
+    base.setAttribute("width", String(Math.max(0, W - 14)));
+    base.setAttribute("height", String(Math.max(0, H - 14)));
+    left.setAttribute("d", "M" + m + " 7H17A10 10 0 0 0 7 17V" + (H - 17) +
+      "A10 10 0 0 0 17 " + (H - 7) + "H" + m);
+    right.setAttribute("d", "M" + m + " 7H" + (W - 17) + "A10 10 0 0 1 " + (W - 7) +
+      " 17V" + (H - 17) + "A10 10 0 0 1 " + (W - 17) + " " + (H - 7) + "H" + m);
+  }
+  function ensureFrame() {
+    let frame = document.getElementById(FRAME_ID);
+    if (frame) return frame;
+    frame = host("ego-agent-frame", FRAME_ID, "display:block;position:fixed;inset:0;" +
+      "pointer-events:none;z-index:2147483646;mix-blend-mode:difference;");
+    const canvas = svg("svg", {},
+      "position:absolute;inset:0;width:100%;height:100%;overflow:visible;");
+    const base = svg("rect", { x: "7", y: "7", rx: "10" },
+      "fill:none;stroke:#fff;stroke-width:1px;");
+    // pathLength 100 deixa o desenho independente do tamanho da janela
+    const stroke = "fill:none;stroke:#fff;stroke-width:2px;stroke-linecap:round;" +
+      "stroke-dasharray:100 100;stroke-dashoffset:100;";
+    canvas.append(base, svg("path", { pathLength: "100" }, stroke),
+      svg("path", { pathLength: "100" }, stroke));
+    const ring = el("div", "position:absolute;left:0;top:0;width:20px;height:20px;" +
+      "margin:-10px 0 0 -10px;box-sizing:border-box;border:2px solid #fff;" +
+      "border-radius:50%;transition:transform .2s ease-out;display:none;");
+    ring.className = "ring";
+    ring.append(el("div", "position:absolute;left:50%;top:50%;width:4px;height:4px;" +
+      "margin:-2px 0 0 -2px;border-radius:50%;background:#fff;"));
+    frame.shadowRoot.append(canvas, ring);
+    layout();
+    if (!resizeBound) {
+      resizeBound = true;
+      addEventListener("resize", layout);
+    }
+    return frame;
+  }
   function ensure() {
+    ensureFrame();
     let root = document.getElementById(ID);
     if (root) return root;
-    root = document.createElement("div");
-    root.id = ID;
-    root.setAttribute("aria-hidden", "true");
-    root.style.cssText =
-      "position:fixed;inset:0;pointer-events:none;z-index:2147483647;" +
-      "transition:opacity .3s;opacity:1;";
-    const style = document.createElement("style");
-    // Moldura solida + halo interno: a moldura garante que a borda seja lida
-    // como estado ("agente no comando"), o halo pulsa para dar movimento.
-    style.textContent =
-      "@keyframes __ego-pulse{0%,100%{box-shadow:inset 0 0 0 4px rgba(99,102,241,.95),inset 0 0 44px 10px rgba(99,102,241,.5)}" +
-      "50%{box-shadow:inset 0 0 0 4px rgba(129,140,248,1),inset 0 0 80px 22px rgba(99,102,241,.8)}}" +
-      "@keyframes __ego-badge-pulse{0%,100%{transform:translateX(-50%) scale(1)}" +
-      "50%{transform:translateX(-50%) scale(1.06)}}";
-    const glow = document.createElement("div");
-    glow.style.cssText =
-      "position:absolute;inset:0;animation:__ego-pulse 1.2s ease-in-out infinite;";
-    const badge = document.createElement("div");
-    badge.className = "__ego-badge";
-    badge.style.cssText =
-      "position:absolute;top:14px;left:50%;transform:translateX(-50%);" +
-      "background:rgba(49,46,129,.96);color:#e0e7ff;font:600 15px/1.5 system-ui,sans-serif;" +
-      "padding:7px 20px;border-radius:999px;white-space:nowrap;display:none;" +
-      "box-shadow:0 4px 18px rgba(49,46,129,.55);letter-spacing:.02em;" +
-      "animation:__ego-badge-pulse 1.2s ease-in-out infinite;";
-    const ring = document.createElement("div");
-    ring.className = "__ego-ring";
-    ring.style.cssText =
-      "position:absolute;left:0;top:0;width:34px;height:34px;margin:-17px 0 0 -17px;" +
-      "border:3px solid rgba(129,140,248,1);border-radius:50%;" +
-      "background:rgba(99,102,241,.35);box-shadow:0 0 16px 4px rgba(99,102,241,.6);" +
-      "transition:transform .2s ease-out;display:none;";
-    root.append(style, glow, badge, ring);
-    (document.body || document.documentElement).appendChild(root);
+    root = host("ego-agent-chip", ID, "display:none;position:fixed;top:10px;left:50%;" +
+      "transform:translateX(-50%);pointer-events:none;z-index:2147483647;");
+    const chip = el("div", "display:flex;align-items:center;gap:10px;height:30px;" +
+      "box-sizing:border-box;padding:0 14px 0 10px;border-radius:999px;" +
+      "background:#0b0b0c;border:1px solid rgba(255,255,255,.16);" +
+      "box-shadow:0 8px 22px -10px rgba(0,0,0,.6);color:#f4f4f1;white-space:nowrap;" +
+      "letter-spacing:.005em;font:500 13px/1 system-ui,-apple-system,'Segoe UI',sans-serif;");
+    // A marca do ego: tres discos em difference, a sobreposicao vira a lente.
+    const mark = el("div", "position:relative;flex:none;width:37px;height:18px;isolation:isolate;");
+    mark.className = "mark";
+    for (const left of [0, 9.5, 19]) {
+      mark.append(el("span", "position:absolute;top:0;left:" + left + "px;width:18px;" +
+        "height:18px;border-radius:50%;background:#fff;mix-blend-mode:difference;"));
+    }
+    const who = el("span", "color:rgba(244,244,241,.5);");
+    who.textContent = "agente";
+    const text = el("span", "display:inline-block;");
+    text.className = "label";
+    chip.append(mark, who, text);
+    root.shadowRoot.append(chip);
     return root;
   }
+  /** Mostra o chip e devolve o shadow root dele. */
   function show() {
     const root = ensure();
-    root.style.opacity = "1";
-    return root;
+    root.style.display = "block";
+    return root.shadowRoot;
   }
-  /** "parado ha 40s" / "parado ha 3 min" — o relogio roda na propria pagina. */
+  function setText(chip, value) {
+    const text = chip.querySelector(".label");
+    if (text.textContent === value) return;
+    text.textContent = value;
+    // reinicia a entrada: o rotulo novo sobe no lugar do antigo
+    text.style.animation = "none";
+    void text.offsetWidth;
+    text.style.animation = "enter .22s ease-out";
+  }
+  /** "parado há 40s" / "parado há 3 min" — o relogio roda na propria pagina. */
   function idleText() {
     const s = Math.max(0, Math.round((Date.now() - idleSince) / 1000));
-    return s < 60
-      ? "agente parado ha " + s + "s"
-      : "agente parado ha " + Math.round(s / 60) + " min";
+    return s < 60 ? "parado há " + s + "s" : "parado há " + Math.round(s / 60) + " min";
   }
   function paint(state, label) {
-    const root = show();
-    const glow = root.children[1];
-    const badge = root.querySelector(".__ego-badge");
-    const ring = root.querySelector(".__ego-ring");
+    const chip = show();
+    const scope = ensureFrame().shadowRoot;
+    const base = scope.querySelector("rect");
+    const strokes = scope.querySelectorAll("path");
+    const discs = chip.querySelectorAll(".mark span");
     clearInterval(clock);
     if (state === "idle") {
       idleSince = idleSince || Date.now();
-      // moldura fina e imovel: marca a aba sem competir com a pagina
-      glow.style.animation = "none";
-      glow.style.boxShadow = "inset 0 0 0 2px rgba(99,102,241,.35)";
-      badge.style.animation = "none";
-      badge.style.background = "rgba(71,85,105,.92)";
-      badge.style.font = "500 13px/1.4 system-ui,sans-serif";
-      badge.textContent = idleText();
-      badge.style.display = "block";
-      ring.style.display = "none";
-      clock = setInterval(function () { badge.textContent = idleText(); }, 15000);
+      // moldura fina e imovel, marca parada no desenho do logo
+      base.style.opacity = ".45";
+      strokes.forEach(function (p) { p.style.animation = "none"; p.style.opacity = "0"; });
+      discs.forEach(function (d, i) {
+        d.style.animation = "none";
+        d.style.transform = "scaleX(" + PHASES[i] + ")";
+      });
+      scope.querySelector(".ring").style.display = "none";
+      setText(chip, idleText());
+      clock = setInterval(function () { setText(chip, idleText()); }, 15000);
       return;
     }
     idleSince = 0;
-    glow.style.animation = "__ego-pulse 1.2s ease-in-out infinite";
-    glow.style.boxShadow = "";
-    badge.style.animation = "__ego-badge-pulse 1.2s ease-in-out infinite";
-    badge.style.background = "rgba(49,46,129,.96)";
-    badge.style.font = "600 15px/1.5 system-ui,sans-serif";
-    if (label) badge.textContent = "agente " + label;
-    badge.style.display = badge.textContent ? "block" : "none";
+    base.style.opacity = ".25";
+    strokes.forEach(function (p) {
+      p.style.opacity = "1";
+      p.style.animation = "draw 3.2s cubic-bezier(.65,0,.35,1) infinite";
+    });
+    discs.forEach(function (d, i) {
+      d.style.transform = "";
+      d.style.animation = "turn 1.6s ease-in-out " + SPIN_DELAYS[i] + "s infinite";
+    });
+    if (label) setText(chip, label);
   }
   globalThis.__egoAgentOverlay = {
     setState: paint,
@@ -254,14 +342,12 @@ const AGENT_OVERLAY_JS = `(() => {
     },
     moveCursor(x, y) {
       paint("active", "");
-      const ring = show().querySelector(".__ego-ring");
+      const ring = ensureFrame().shadowRoot.querySelector(".ring");
       ring.style.display = "block";
       ring.style.transform = "translate(" + x + "px," + y + "px)";
     },
     setLabel(label) {
-      const badge = show().querySelector(".__ego-badge");
-      badge.textContent = label;
-      badge.style.display = label ? "block" : "none";
+      setText(show(), label);
     },
   };
 })()`;
