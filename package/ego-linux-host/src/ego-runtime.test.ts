@@ -1343,6 +1343,53 @@ test("sem atividade, o overlay cai para o estado parado", async () => {
   );
 });
 
+/** Coleta expressões do overlay junto da sessão que as recebeu. */
+function captureOverlayCalls(
+  fakeCdp: any,
+): { expr: string; sessionId?: string }[] {
+  const calls: { expr: string; sessionId?: string }[] = [];
+  const orig = fakeCdp.send;
+  fakeCdp.send = async (method: string, params: any, sessionId?: string) => {
+    if (
+      method === "Runtime.evaluate" &&
+      params.expression.includes("__egoAgentOverlay")
+    ) {
+      calls.push({ expr: params.expression, sessionId });
+    }
+    return orig(method, params, sessionId);
+  };
+  return calls;
+}
+
+test("o overlay cai para parado na aba certa mesmo apos o cliente sair", async () => {
+  // Cada invocacao de `ego-browser` e um processo que morre assim que o comando
+  // termina, bem antes dos 5s de silencio. O timer de idle dispara fora do
+  // AsyncLocalStorage do cliente e depois do releaseClient, quando "a aba
+  // selecionada" nao resolve mais para nada — era isso que deixava o badge
+  // preso em "agente trabalhando" para sempre.
+  const { sm, fakeCdp, runtime } = setupWithIdle(25);
+  const calls = captureOverlayCalls(fakeCdp);
+
+  await sm.runForClient("client-1", async () => {
+    sm.use(sm.createAgentSpace("job").id);
+    sm.assignTarget("tab-1");
+    await runtime.handle("sendCDPMessage", {
+      payload:
+        '{"id":1,"method":"Page.navigate","params":{"url":"about:blank"}}',
+    });
+  });
+  sm.releaseClient("client-1");
+
+  await new Promise((r) => setTimeout(r, 60));
+  const idle = calls.filter((c) => c.expr.includes('setState("idle"'));
+  assert.equal(idle.length, 1, "o estado parado precisa ser pintado uma vez");
+  assert.equal(
+    idle[0].sessionId,
+    "session-tab-1",
+    "o parado tem que ir para a aba que recebeu o badge, nao para a sessao de fallback",
+  );
+});
+
 test("Target.activateTarget makes that tab active for listTabs and snapshot across rounds", async () => {
   const { sm, fakeCdp, runtime } = setup();
   sm.use(sm.createAgentSpace("a2").id);

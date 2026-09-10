@@ -7,6 +7,7 @@ not been tagged yet.
 
 ### Fixed
 
+- Drop the agent overlay to its idle state after the client disconnects, instead of leaving the tab claiming an agent is working on it.
 - Report the package version from `--doctor`, the client handshake and the status payload, instead of a literal that stayed at 0.1.0 through the 0.2.0 release.
 
 ## [0.2.0] - 2026-09-10
