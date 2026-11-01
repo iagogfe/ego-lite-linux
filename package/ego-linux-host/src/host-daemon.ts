@@ -17,6 +17,7 @@ import {
   AGENT_VIEWPORT,
   ensureChrome,
   isCdpUp,
+  resolveHeadlessUserAgent,
   type ChromeHandle,
   type EnsureChromeOptions,
 } from "./chrome-supervisor.js";
@@ -43,6 +44,11 @@ const BROWSER_CONFIG_KEYS = [
   "userDataDir",
   "cdpPort",
   "headless",
+  "headlessIdentity",
+  "lang",
+  "acceptLang",
+  "timezone",
+  "userAgent",
 ] as const;
 
 type BrowserConfig = Pick<HostConfig, (typeof BROWSER_CONFIG_KEYS)[number]>;
@@ -152,6 +158,11 @@ function browserConfig(config: HostConfig): BrowserConfig {
     userDataDir: config.userDataDir,
     cdpPort: config.cdpPort,
     headless: config.headless,
+    headlessIdentity: config.headlessIdentity,
+    lang: config.lang,
+    acceptLang: config.acceptLang,
+    timezone: config.timezone,
+    userAgent: config.userAgent,
   };
 }
 
@@ -799,6 +810,16 @@ async function buildDoctor(
         }
       : null,
     headless: config.headless,
+    headlessIdentity: config.headlessIdentity ?? "real",
+    // What the browser actually announces; null when headed, `strict`, or the
+    // binary could not be versioned (then no override is passed either).
+    headlessUserAgent: (config.headlessIdentity ?? "real") === "strict"
+      ? null
+      : (config.userAgent ??
+        resolveHeadlessUserAgent(chrome?.path ?? config.chromePath)),
+    lang: config.lang ?? null,
+    acceptLang: config.acceptLang ?? null,
+    timezone: config.timezone ?? null,
     displayEnv: Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY),
     // Resolved by the CLI shim (daemon does not know the harness layout).
     harnessPath: null,

@@ -50,6 +50,11 @@ test("runCli sends the effective config with reload", async () => {
         headless: false,
         hostSocket: "/tmp/ego-reload.sock",
         dataDir: "/tmp/ego-reload-data",
+        headlessIdentity: "real",
+        lang: "en-US",
+        acceptLang: "en-US,en",
+        timezone: null,
+        userAgent: null,
       },
     },
   ]);

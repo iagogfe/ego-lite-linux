@@ -86,9 +86,34 @@ Without Chrome + display, skip the smoke script; unit/integration tests still pa
 | `defaultSocketPath()` | `EGO_HOST_SOCK`     | `<dataDir>/host.sock`                                  |
 | `defaultCdpPort()`    | `EGO_CDP_PORT`      | `9222`                                                 |
 
+### Headless identity
+
+A stock headless Chrome announces `HeadlessChrome/<major>` in its User-Agent, and
+sites that gate on a real browser (for example goofish.com) turn it away with a
+risk-control page — `navigator.webdriver` is already `false` there, so hiding it
+changes nothing. The host therefore launches headless Chrome with the identity a
+desktop browser on this machine has:
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `EGO_HEADLESS_IDENTITY` | `real` | `real` adds the identity flags below; `strict` keeps the old launch line (A/B checks) |
+| `EGO_LANG` | locale of `LC_ALL`/`LC_MESSAGES`/`LANG`, else `en-US` | `--lang=` UI language |
+| `EGO_ACCEPT_LANG` | derived from `EGO_LANG` (`zh-CN` → `zh-CN,zh,en`) | `--accept-lang=`, which is what `navigator.languages` reports |
+| `EGO_TZ` | unset (inherit the daemon's `TZ`) | `TZ` for the browser process only |
+| `EGO_USER_AGENT` | unset (derived) | explicit `--user-agent=` override |
+
+The derived UA is `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/<major>.0.0.0 Safari/537.36`,
+where `<major>` comes from `<chrome> --version` and the platform token from this
+machine — never a faked Windows UA, which would contradict `navigator.platform`.
+Flags are set at launch, so every tab and every respawn carries them; no per-tab
+`Network.setUserAgentOverride` is needed. Headed launches are untouched.
+
+Identity flags do not defeat login walls, CAPTCHAs, or access control: when a site
+asks for a human, hand the task space off.
+
 ## Diagnostics (`ego-browser --doctor`)
 
-Reports (among others): `chromePath`, `chromeRunning`, `chromeError`, `cdpPort`, `cdpUp`, `profileDir`, `socketPath`, `daemonPid`, `spaceCount`, `selectedSpace`, `headless`, `displayEnv`, `harnessPath`.
+Reports (among others): `chromePath`, `chromeRunning`, `chromeError`, `cdpPort`, `cdpUp`, `profileDir`, `socketPath`, `daemonPid`, `spaceCount`, `selectedSpace`, `headless`, `headlessIdentity`, `headlessUserAgent`, `lang`, `acceptLang`, `timezone`, `displayEnv`, `harnessPath`.
 
 Hardening behavior:
 
@@ -100,7 +125,7 @@ Hardening behavior:
 
 The CLI resolves the current effective host configuration and sends it with `--reload`.
 
-- Changes to `headless`, `chromePath`, `userDataDir`, or `cdpPort` restart Chromium while preserving task spaces.
+- Changes to `headless`, `chromePath`, `userDataDir`, `cdpPort`, or any headless-identity field (`headlessIdentity`, `lang`, `acceptLang`, `timezone`, `userAgent`) restart Chromium while preserving task spaces.
 - If those browser-launch fields are unchanged, reload only reconnects the CDP browser connection.
 - If the restart fails, reload reports `EGO_BROWSER_UNAVAILABLE`.
 

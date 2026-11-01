@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { accessSync, constants } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -40,6 +40,120 @@ const CDP_READY_TIMEOUT_MS = 15_000;
 // Polling a closed loopback port is a fast ECONNREFUSED; 100ms wasted up to
 // 100ms after Chrome was already listening.
 const CDP_POLL_MS = 20;
+
+/** `--version` output is stable for a binary; run it once per process. */
+const chromeMajorCache = new Map<string, string | null>();
+const CHROME_VERSION_TIMEOUT_MS = 5_000;
+
+/**
+ * Platform token of a real Linux Chrome UA (`X11; Linux x86_64`).
+ * It must match what `navigator.platform` reports, so derive it from the
+ * machine we run on instead of faking a Win32 browser from a Linux process.
+ */
+export function chromePlatformToken(machine: string = process.arch): string {
+  const arch =
+    machine === "x64"
+      ? "x86_64"
+      : machine === "arm64"
+        ? "aarch64"
+        : machine === "ia32"
+          ? "i686"
+          : machine;
+  return `X11; Linux ${arch}`;
+}
+
+/** Major version out of `google-chrome-stable --version` (or `Chromium 140.0…`). */
+export function parseChromeMajorVersion(raw: string): string | null {
+  const match = /\b(\d+)\.\d+\.\d+\.\d+\b/.exec(raw);
+  return match ? match[1] : null;
+}
+
+/**
+ * UA a real Chrome of this major version sends on Linux. Chrome's reduced UA
+ * zeroes minor/build/patch, so `Chrome/<major>.0.0.0` is exactly what a person
+ * browsing from this machine reports.
+ */
+export function buildChromeUserAgent(
+  major: string,
+  machine: string = process.arch,
+): string {
+  return (
+    `Mozilla/5.0 (${chromePlatformToken(machine)}) ` +
+    `AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36`
+  );
+}
+
+function detectChromeMajorVersion(chromePath: string): string | null {
+  if (chromeMajorCache.has(chromePath)) {
+    return chromeMajorCache.get(chromePath) ?? null;
+  }
+  let major: string | null = null;
+  try {
+    // `--version` prints and exits in ~30ms; cached, so spawn is the only cost.
+    major = parseChromeMajorVersion(
+      execFileSync(chromePath, ["--version"], {
+        encoding: "utf8",
+        timeout: CHROME_VERSION_TIMEOUT_MS,
+        stdio: ["ignore", "pipe", "ignore"],
+      }),
+    );
+  } catch {
+    major = null;
+  }
+  chromeMajorCache.set(chromePath, major);
+  return major;
+}
+
+/**
+ * LAUNCH identity for a headless browser, or null when it cannot be derived
+ * (missing binary, unreadable `--version`).
+ */
+export function resolveHeadlessUserAgent(
+  chromePath: string | null,
+  machine: string = process.arch,
+): string | null {
+  if (!chromePath) return null;
+  const major = detectChromeMajorVersion(chromePath);
+  return major ? buildChromeUserAgent(major, machine) : null;
+}
+
+function identityMode(config: HostConfig): "real" | "strict" {
+  return config.headlessIdentity === "strict" ? "strict" : "real";
+}
+
+/**
+ * Launch flags that make a headless Chrome look like the desktop Chrome it is.
+ * Applied at launch rather than per tab: every tab and every respawn inherits
+ * them, where `Network.setUserAgentOverride` has to be repeated per target.
+ * Returns nothing for headed launches or `EGO_HEADLESS_IDENTITY=strict`.
+ */
+export function headlessIdentityArgs(
+  config: HostConfig,
+  chromePath: string | null,
+  machine: string = process.arch,
+): string[] {
+  if (!config.headless || identityMode(config) === "strict") return [];
+  const args: string[] = [];
+  const userAgent =
+    config.userAgent ?? resolveHeadlessUserAgent(chromePath, machine);
+  if (userAgent) args.push(`--user-agent=${userAgent}`);
+  if (config.lang) args.push(`--lang=${config.lang}`);
+  if (config.acceptLang) args.push(`--accept-lang=${config.acceptLang}`);
+  // navigator.webdriver is already false under --headless=new; this keeps the
+  // Blink feature off for Chrome builds that still enable it in headless.
+  args.push("--disable-blink-features=AutomationControlled");
+  return args;
+}
+
+/** Env for the spawned browser: `EGO_TZ` scopes the timezone to the browser. */
+export function chromeSpawnEnv(
+  config: HostConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  if (!config.headless || identityMode(config) === "strict") return env;
+  if (!config.timezone) return env;
+  return { ...env, TZ: config.timezone };
+}
 
 export type ChromeHandle = {
   pid: number;
@@ -271,12 +385,13 @@ export async function ensureChrome(
       "--disable-extensions",
       `--window-size=${AGENT_VIEWPORT.width},${AGENT_VIEWPORT.height + 160}`,
     );
+    args.push(...headlessIdentityArgs(config, chromePath));
   }
 
   const child = spawn(chromePath, args, {
     detached: true,
     stdio: "ignore",
-    env: process.env,
+    env: chromeSpawnEnv(config),
   });
 
   // Own process group so kill(-pid) tears down Chrome helpers.

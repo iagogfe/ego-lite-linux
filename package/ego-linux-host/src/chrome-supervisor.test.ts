@@ -5,6 +5,11 @@ import { writeFile, chmod, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
+  buildChromeUserAgent,
+  chromePlatformToken,
+  chromeSpawnEnv,
+  headlessIdentityArgs,
+  parseChromeMajorVersion,
   resolveChromePath,
   isCdpUp,
   ensureChrome,
@@ -194,4 +199,131 @@ test("ensureChrome throws when headed without display", async () => {
     if (prevWayland !== undefined) process.env.WAYLAND_DISPLAY = prevWayland;
     else delete process.env.WAYLAND_DISPLAY;
   }
+});
+
+test("parseChromeMajorVersion reads the major from --version output", () => {
+  assert.equal(parseChromeMajorVersion("Google Chrome 156.0.8078.79"), "156");
+  assert.equal(parseChromeMajorVersion("Chromium 140.0.7339.80\n"), "140");
+  assert.equal(parseChromeMajorVersion("not a version"), null);
+});
+
+test("buildChromeUserAgent reports a real Linux Chrome, never HeadlessChrome", () => {
+  const ua = buildChromeUserAgent("156", "x64");
+  assert.equal(
+    ua,
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36",
+  );
+  assert.equal(ua.includes("HeadlessChrome"), false);
+  assert.equal(chromePlatformToken("x64"), "X11; Linux x86_64");
+  assert.equal(chromePlatformToken("arm64"), "X11; Linux aarch64");
+});
+
+async function writeFakeChrome(
+  name: string,
+  body: string,
+): Promise<{ dir: string; bin: string }> {
+  const dir = join(tmpdir(), `ego-identity-${name}-${process.pid}`);
+  await mkdir(dir, { recursive: true });
+  const bin = join(dir, name);
+  await writeFile(bin, body);
+  await chmod(bin, 0o755);
+  return { dir, bin };
+}
+
+test("headlessIdentityArgs passes a real UA, language and no automation flag", async () => {
+  const { dir, bin } = await writeFakeChrome(
+    "fake-chrome-identity",
+    "#!/bin/sh\necho 'Google Chrome 156.0.8078.79'\n",
+  );
+  try {
+    const args = headlessIdentityArgs(
+      baseConfig({
+        headless: true,
+        headlessIdentity: "real",
+        lang: "zh-CN",
+        acceptLang: "zh-CN,zh,en",
+      }),
+      bin,
+      "x64",
+    );
+    const joined = args.join("\n");
+    assert.match(joined, /--user-agent=Mozilla\/5\.0 \(X11; Linux x86_64\)/);
+    assert.match(joined, /Chrome\/156\.0\.0\.0 Safari\/537\.36/);
+    assert.equal(joined.includes("HeadlessChrome"), false);
+    assert.ok(args.includes("--lang=zh-CN"));
+    assert.ok(args.includes("--accept-lang=zh-CN,zh,en"));
+    assert.ok(args.includes("--disable-blink-features=AutomationControlled"));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("headlessIdentityArgs prefers an explicit EGO_USER_AGENT", () => {
+  const args = headlessIdentityArgs(
+    baseConfig({
+      headless: true,
+      userAgent: "Mozilla/5.0 (X11; Linux x86_64) Custom/1.0",
+    }),
+    null,
+  );
+  assert.ok(args.includes("--user-agent=Mozilla/5.0 (X11; Linux x86_64) Custom/1.0"));
+});
+
+test("headlessIdentityArgs skips the UA when Chrome cannot be versioned", async () => {
+  const { dir, bin } = await writeFakeChrome(
+    "fake-chrome-noversion",
+    "#!/bin/sh\nexit 1\n",
+  );
+  try {
+    const args = headlessIdentityArgs(
+      baseConfig({ headless: true, lang: "zh-CN", acceptLang: "zh-CN,zh,en" }),
+      bin,
+    );
+    assert.equal(
+      args.some((arg) => arg.startsWith("--user-agent=")),
+      false,
+    );
+    assert.ok(args.includes("--lang=zh-CN"));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("headlessIdentityArgs is empty for strict identity and headed launches", () => {
+  assert.deepEqual(
+    headlessIdentityArgs(
+      baseConfig({ headless: true, headlessIdentity: "strict", lang: "zh-CN" }),
+      null,
+    ),
+    [],
+  );
+  assert.deepEqual(
+    headlessIdentityArgs(
+      baseConfig({ headless: false, headlessIdentity: "real", lang: "zh-CN" }),
+      null,
+    ),
+    [],
+  );
+});
+
+test("chromeSpawnEnv scopes EGO_TZ to the headless real browser", () => {
+  const env = { PATH: "/usr/bin" };
+  assert.deepEqual(
+    chromeSpawnEnv(
+      baseConfig({ headless: true, headlessIdentity: "real", timezone: "Asia/Shanghai" }),
+      env,
+    ),
+    { PATH: "/usr/bin", TZ: "Asia/Shanghai" },
+  );
+  assert.equal(
+    chromeSpawnEnv(
+      baseConfig({ headless: true, headlessIdentity: "strict", timezone: "Asia/Shanghai" }),
+      env,
+    ),
+    env,
+  );
+  assert.equal(
+    chromeSpawnEnv(baseConfig({ headless: true, timezone: null }), env),
+    env,
+  );
 });

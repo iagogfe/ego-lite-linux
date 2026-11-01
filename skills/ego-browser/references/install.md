@@ -66,6 +66,14 @@ Until an explicit, guarded implementation lands, use Chrome’s own export/impor
 | Headed (preferred) | Interactive browsing, visual debug | WSLg or native Linux desktop; ensure `DISPLAY` is set |
 | Headless | CI / no GUI | `export EGO_HEADLESS=1` before `ego-browser` |
 
+Headless launches announce a desktop Chrome of the same version by default
+(`EGO_HEADLESS_IDENTITY=real`), plus `--lang`/`--accept-lang` from the environment
+locale (`EGO_LANG`, `EGO_ACCEPT_LANG`). Without that, the UA carries the
+`HeadlessChrome` token and sites with browser risk controls (e.g. goofish.com)
+serve an "illegal access" page. `EGO_HEADLESS_IDENTITY=strict` restores the old
+launch line for comparison. See `package/ego-linux-host/README.md` (Headless
+identity).
+
 MVP targets **Linux-side** Chrome/Chromium only. Pointing at Windows Chrome under `/mnt/c/...` is out of scope.
 
 If Chrome lives in a non-standard path:

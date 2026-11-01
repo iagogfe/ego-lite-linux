@@ -5,6 +5,11 @@ not been tagged yet.
 
 ## [Unreleased]
 
+### Added
+
+- Launch headless Chrome with the identity of the desktop browser on this machine: a real Chrome UA derived from `<chrome> --version`, `--lang`/`--accept-lang` from the environment locale, and `--disable-blink-features=AutomationControlled`, so sites that gate on `HeadlessChrome` (goofish.com) load instead of a risk-control page. `EGO_HEADLESS_IDENTITY=strict` restores the old launch line; `EGO_TZ` scopes a browser timezone.
+- Report `headlessIdentity`, `headlessUserAgent`, `lang`, `acceptLang`, and `timezone` in `ego-browser --doctor`.
+
 ## [0.2.0] - 2026-09-10
 
 ### Added

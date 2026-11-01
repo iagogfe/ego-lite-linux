@@ -8,6 +8,15 @@ import {
   defaultSocketPath,
 } from "./paths.js";
 
+/**
+ * How a headless browser presents itself to sites.
+ * - `real` (default): launch with a non-headless Chrome UA, the requested
+ *   language, and without the AutomationControlled Blink feature, so a site
+ *   does not see a headless Chromium that answers JS like no person does.
+ * - `strict`: the launch line upstream shipped before; kept for A/B checks.
+ */
+export type HeadlessIdentity = "real" | "strict";
+
 export type HostConfig = {
   chromePath: string | null;
   userDataDir: string;
@@ -17,6 +26,16 @@ export type HostConfig = {
   dataDir: string;
   /** Idle time before an agent task space's tabs are closed (ms). */
   agentSpaceTtlMs?: number;
+  /** Headless identity mode; undefined means `real`. */
+  headlessIdentity?: HeadlessIdentity;
+  /** UI language (`--lang`) for the headless browser; undefined means locale of the env. */
+  lang?: string;
+  /** `--accept-lang` value; undefined means derived from `lang`. */
+  acceptLang?: string;
+  /** `TZ` for the spawned browser; null/undefined inherits the daemon's. */
+  timezone?: string | null;
+  /** Explicit `--user-agent`; undefined means derived from the Chrome binary. */
+  userAgent?: string | null;
 };
 
 /** Optional fields from ~/.config/ego-lite/config.json */
@@ -54,6 +73,46 @@ function parseTruthy(raw: string | undefined): boolean | undefined {
   if (v === "1" || v === "true" || v === "yes") return true;
   if (v === "0" || v === "false" || v === "no") return false;
   return Boolean(raw);
+}
+
+/**
+ * Normalize a locale for `--lang`: `zh_CN.UTF-8@modifier` → `zh-CN`.
+ * Returns null for values Chrome would not accept as a BCP-47 tag.
+ */
+export function normalizeLocale(raw: string | undefined): string | null {
+  if (!raw) return null;
+  const tag = raw.split("@")[0].split(".")[0].replace(/_/g, "-");
+  if (!/^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/.test(tag)) return null;
+  const [language, ...rest] = tag.split("-");
+  return [
+    language.toLowerCase(),
+    ...rest.map((part) =>
+      part.length === 2 ? part.toUpperCase() : part.toLowerCase(),
+    ),
+  ].join("-");
+}
+
+/** Locale from the process environment, in the order glibc resolves it. */
+export function localeFromEnv(env: NodeJS.ProcessEnv): string | null {
+  for (const key of ["LC_ALL", "LC_MESSAGES", "LANG"]) {
+    const normalized = normalizeLocale(env[key]);
+    if (normalized && normalized !== "c" && normalized !== "posix") {
+      return normalized;
+    }
+  }
+  return null;
+}
+
+/**
+ * Accept-Language for a locale: `zh-CN` → `zh-CN,zh,en`.
+ * The language tag, its base language, and English (when not the base).
+ */
+export function deriveAcceptLang(lang: string): string {
+  const base = lang.split("-")[0];
+  const parts = [lang];
+  if (base.toLowerCase() !== lang.toLowerCase()) parts.push(base);
+  if (base.toLowerCase() !== "en") parts.push("en");
+  return parts.join(",");
 }
 
 /**
@@ -109,6 +168,17 @@ export async function loadConfig(
 
   const ttlRaw = Number(env.EGO_AGENT_SPACE_TTL_MS);
 
+  // A headless browser that reports HeadlessChrome in its UA is turned away by
+  // site risk controls even though navigator.webdriver is already false.
+  // `real` hides that tell at launch, so every tab and every respawn inherits
+  // it; `strict` keeps the old launch line for A/B comparison.
+  const headlessIdentity: HeadlessIdentity =
+    (env.EGO_HEADLESS_IDENTITY ?? "").toLowerCase() === "strict"
+      ? "strict"
+      : "real";
+  const lang = normalizeLocale(env.EGO_LANG) ?? localeFromEnv(env) ?? "en-US";
+  const acceptLang = env.EGO_ACCEPT_LANG?.trim() || deriveAcceptLang(lang);
+
   return {
     chromePath,
     userDataDir,
@@ -116,6 +186,11 @@ export async function loadConfig(
     headless,
     hostSocket,
     dataDir,
+    headlessIdentity,
+    lang,
+    acceptLang,
+    timezone: env.EGO_TZ?.trim() || null,
+    userAgent: env.EGO_USER_AGENT?.trim() || null,
     ...(Number.isFinite(ttlRaw) && env.EGO_AGENT_SPACE_TTL_MS
       ? { agentSpaceTtlMs: ttlRaw }
       : {}),

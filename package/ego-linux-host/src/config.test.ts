@@ -91,3 +91,43 @@ test("loadConfig reads optional config.json when env absent", async () => {
     await rm(base, { recursive: true, force: true });
   }
 });
+
+test("loadConfig defaults headless identity to real with locale-derived language", async () => {
+  const cfg = await loadConfig({
+    EGO_CONFIG_DIR: "/tmp/ego-cfg-identity-missing",
+    EGO_DATA_DIR: "/tmp/ego-cfg-identity",
+    LANG: "zh_CN.UTF-8",
+  });
+  assert.equal(cfg.headlessIdentity, "real");
+  assert.equal(cfg.lang, "zh-CN");
+  assert.equal(cfg.acceptLang, "zh-CN,zh,en");
+  assert.equal(cfg.timezone, null);
+  assert.equal(cfg.userAgent, null);
+});
+
+test("loadConfig honors EGO_HEADLESS_IDENTITY, EGO_LANG, EGO_ACCEPT_LANG, EGO_TZ, EGO_USER_AGENT", async () => {
+  const cfg = await loadConfig({
+    EGO_CONFIG_DIR: "/tmp/ego-cfg-identity-missing",
+    EGO_DATA_DIR: "/tmp/ego-cfg-identity-env",
+    LANG: "en_US.UTF-8",
+    EGO_HEADLESS_IDENTITY: "strict",
+    EGO_LANG: "ja-JP",
+    EGO_ACCEPT_LANG: "ja-JP,ja;q=0.9,en;q=0.8",
+    EGO_TZ: "Asia/Tokyo",
+    EGO_USER_AGENT: "Mozilla/5.0 (X11; Linux x86_64) Test/1.0",
+  });
+  assert.equal(cfg.headlessIdentity, "strict");
+  assert.equal(cfg.lang, "ja-JP");
+  assert.equal(cfg.acceptLang, "ja-JP,ja;q=0.9,en;q=0.8");
+  assert.equal(cfg.timezone, "Asia/Tokyo");
+  assert.equal(cfg.userAgent, "Mozilla/5.0 (X11; Linux x86_64) Test/1.0");
+});
+
+test("loadConfig falls back to en-US when the environment carries no locale", async () => {
+  const cfg = await loadConfig({
+    EGO_CONFIG_DIR: "/tmp/ego-cfg-identity-missing",
+    EGO_DATA_DIR: "/tmp/ego-cfg-identity-fallback",
+  });
+  assert.equal(cfg.lang, "en-US");
+  assert.equal(cfg.acceptLang, "en-US,en");
+});
