@@ -5,6 +5,10 @@ not been tagged yet.
 
 ## [Unreleased]
 
+### Added
+
+- Add `ego-browser --viewer away|present`: while nobody watches the desktop and the agents are idle, the host minimizes the browser windows so Chromium stops rendering, and restores them before the next ego call.
+
 ### Changed
 
 - Redesign the agent overlay around the ego mark: a chip whose disc spins while the agent acts and rests on the logo when it stops, and a frame drawn by two strokes that leave the chip and run down both sides of the tab. The idle label now reads "parado há", with the accent it was missing.

@@ -1155,3 +1155,76 @@ test("successful reload commits only browser launch configuration", async () => 
     }
   });
 });
+
+test("viewer away cools the windows and an ego call brings them back first", async () => {
+  await withTempDir(async (dir) => {
+    const config = { ...testConfig(dir), headless: false };
+    const states = new Map<number, string>([[7, "maximized"]]);
+    const seenAtCall: string[] = [];
+    const daemon = await startDaemon({
+      config,
+      viewerIdleMs: 10,
+      connectCdp: async () => ({
+        ...fakeCdp(),
+        isOpen: () => true,
+        async send(method: string, params: any) {
+          if (method === "Browser.getWindowForTarget") return { windowId: 7 };
+          if (method === "Browser.getWindowBounds") {
+            return { bounds: { windowState: states.get(params.windowId) } };
+          }
+          if (method === "Browser.setWindowBounds") {
+            states.set(params.windowId, params.bounds.windowState);
+            return {};
+          }
+          return {};
+        },
+        async listPageTargets() {
+          seenAtCall.push(states.get(7)!);
+          return [{ targetId: "t-1", title: "", url: "", type: "page" }];
+        },
+      }),
+      ensureChrome: async () => ({
+        pid: 0,
+        cdpPort: config.cdpPort,
+        userDataDir: config.userDataDir,
+        path: null,
+        async kill() {},
+      }),
+    });
+    try {
+      await assert.rejects(rpcCall(daemon.socketPath, "viewer", {}), /present/);
+
+      const away = await rpcCall(daemon.socketPath, "viewer", {
+        present: false,
+      });
+      assert.equal(away.viewer, "away");
+      await delay(60);
+      assert.equal(states.get(7), "minimized");
+
+      seenAtCall.length = 0;
+      await rpcCall(daemon.socketPath, "ego.listTabs", {});
+      assert.equal(states.get(7), "maximized");
+      // The restore sweep lists the tabs first (still minimized); the call's
+      // own listing comes last and must find the window back up.
+      assert.equal(
+        seenAtCall.at(-1),
+        "maximized",
+        "the ego call must not see a minimized window",
+      );
+
+      await delay(60);
+      assert.equal(
+        states.get(7),
+        "minimized",
+        "re-cools once the agents are idle",
+      );
+      const present = await rpcCall(daemon.socketPath, "viewer", {
+        present: true,
+      });
+      assert.deepEqual(present, { viewer: "present", cooled: false });
+      assert.equal(states.get(7), "maximized");
+    } finally {
+      await daemon.close();
+    }
+  });
+});
