@@ -104,6 +104,20 @@ The CLI resolves the current effective host configuration and sends it with `--r
 - If those browser-launch fields are unchanged, reload only reconnects the CDP browser connection.
 - If the restart fails, reload reports `EGO_BROWSER_UNAVAILABLE`.
 
+### Viewer cooldown (`ego-browser --viewer away|present`)
+
+A headed Chromium on a remote desktop (Selkies, noVNC, ...) keeps rendering after the last viewer leaves: the window is still mapped, so every page stays `visible`. Tell the host when nobody is watching and it minimizes the browser windows once the agents have been idle for 30s, which turns the pages `hidden` so Chromium stops painting and throttles them.
+
+- Every ego call restores the windows (to their previous state) before it runs: hidden pages drop wheel input and never fire `requestAnimationFrame`, so agents always work on a visible window. They go back down after the next 30s of idle.
+- `--viewer present` brings back every minimized window. Until `--viewer away` is sent, the host never touches a window. Headless ignores it.
+- No cooldown while any client connection is open, so a heredoc that waits between calls keeps its page. What was minimized is recorded in `viewer-cooldown.json` under the data dir, so a restarted daemon still restores it.
+- Wire it to the desktop's connect/disconnect hooks, e.g. for Selkies:
+
+```yaml
+SELKIES_RUN_AFTER_CONNECT: "ego-browser --viewer present"
+SELKIES_RUN_AFTER_DISCONNECT: "ego-browser --viewer away"
+```
+
 ## Source layout
 
 ```text

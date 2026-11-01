@@ -38,6 +38,7 @@ import {
   type RpcResponse,
 } from "./rpc.js";
 import { SpaceManager } from "./space-manager.js";
+import { createViewerCooldown } from "./viewer-cooldown.js";
 
 // Read rather than hardcode: this is what --doctor, the client handshake and
 // the status payload report, and a literal only stays right while someone
@@ -73,6 +74,8 @@ export type HostDaemonOptions = {
     config: HostConfig,
     options?: EnsureChromeOptions,
   ) => Promise<ChromeHandle>;
+  /** Override how long agents stay quiet before a viewer cooldown (tests). */
+  viewerIdleMs?: number;
   /** Override attached-browser shutdown confirmation timeout (tests). */
   browserShutdownTimeoutMs?: number;
   /** Override spaces.json path. */
@@ -307,6 +310,19 @@ export async function startDaemon(
     log,
   });
 
+  // Headless has no window to minimize; the viewer signal is a no-op there.
+  const cooldown = config.headless
+    ? null
+    : createViewerCooldown({
+        getCdp,
+        idleMs: options.viewerIdleMs,
+        statePath: join(dataDir, "viewer-cooldown.json"),
+        // An open connection is an agent mid-heredoc (or a hook about to
+        // close): a script waiting 30s between calls must not lose its page.
+        hasClients: () => clients.size > 0,
+        log,
+      });
+
   let detachForward: (() => void) | undefined;
   if (!options.skipChrome && cdp) {
     detachForward = runtime.attachCdpForwarding();
@@ -529,6 +545,18 @@ export async function startDaemon(
         chromeStartupError,
       );
     }
+    if (method === "viewer") {
+      if (typeof params?.present !== "boolean") {
+        throw makeEgoError(
+          "EGO_INVALID_ARGUMENT",
+          "viewer expects { present: boolean }",
+        );
+      }
+      if (!cooldown)
+        return { viewer: "present", cooled: false, headless: true };
+      await cooldown.setViewer(params.present);
+      return cooldown.status();
+    }
     if (method === "reload") {
       const requestedConfig = params?.config as HostConfig | undefined;
       if (!requestedConfig || !browserConfigChanged(config, requestedConfig)) {
@@ -575,14 +603,21 @@ export async function startDaemon(
     }
     if (method.startsWith("ego.")) {
       await ensureBrowserReady();
-      const result = await runtime.handle(method, params ?? {});
-      // Persist space mutations (best-effort)
       try {
-        await spaceManager.save();
-      } catch {
-        // ignore
+        // A minimized window has hidden pages that drop wheel input and never
+        // fire rAF: bring it back before the call touches a page.
+        await cooldown?.beginCall();
+        const result = await runtime.handle(method, params ?? {});
+        // Persist space mutations (best-effort)
+        try {
+          await spaceManager.save();
+        } catch {
+          // ignore
+        }
+        return result;
+      } finally {
+        cooldown?.endCall();
       }
-      return result;
     }
     throw makeEgoError("EGO_INVALID_ARGUMENT", `unknown RPC method: ${method}`);
   }
@@ -666,12 +701,14 @@ export async function startDaemon(
 
     socket.on("close", () => {
       clients.delete(socket);
+      cooldown?.clientClosed();
       clientSockets.delete(clientId);
       spaceManager.releaseClient(clientId);
       runtime.releaseClient(clientId);
     });
     socket.on("error", () => {
       clients.delete(socket);
+      cooldown?.clientClosed();
       clientSockets.delete(clientId);
       spaceManager.releaseClient(clientId);
       runtime.releaseClient(clientId);
@@ -707,6 +744,7 @@ export async function startDaemon(
     if (closed) return;
     closed = true;
     log(`daemon stopping pid=${process.pid}`);
+    cooldown?.dispose();
     if (detachForward) {
       detachForward();
       detachForward = undefined;

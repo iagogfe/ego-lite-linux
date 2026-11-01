@@ -55,6 +55,33 @@ test("runCli sends the effective config with reload", async () => {
   ]);
 });
 
+test("runCli --viewer sends the viewer signal and rejects unknown values", async () => {
+  const conn = mockConn({
+    request: async () => ({ viewer: "away", cooled: false }),
+  });
+  const out: string[] = [];
+  const stdout = { write: (s: string) => (out.push(s), true) } as any;
+  const stderr = { write: () => true } as any;
+  const opts = {
+    env: { EGO_HOST_SOCK: "/tmp/ego-viewer.sock", EGO_HEADLESS: "0" },
+    ensureHost: async () => {},
+    connectHost: async () => conn,
+    stdout,
+    stderr,
+  };
+
+  assert.equal(await runCli(["--viewer", "away"], opts), 0);
+  assert.deepEqual(conn.calls[0], ["viewer", { present: false }]);
+  assert.deepEqual(JSON.parse(out.join("")), { viewer: "away", cooled: false });
+
+  assert.equal(await runCli(["--viewer", "gone"], opts), 2);
+  assert.equal(
+    conn.calls.length,
+    1,
+    "an invalid value must not reach the host",
+  );
+});
+
 function mockConn(handler?: {
   request?: (method: string, params?: any) => Promise<any>;
   events?: Array<(event: string, params?: any) => void>;
@@ -280,11 +307,15 @@ test("parseCliFlags detects help/doctor/reload", () => {
     reload: false,
     remaining: [],
   });
+  assert.equal(parseCliFlags(["--viewer", "away"]).viewer, "away");
+  assert.equal(parseCliFlags(["--viewer", "present"]).viewer, "present");
+  assert.equal(parseCliFlags(["--viewer"]).viewer, "invalid");
 });
 
 test("CLI_HELP mentions doctor and reload", () => {
   assert.match(CLI_HELP, /--doctor/);
   assert.match(CLI_HELP, /--reload/);
+  assert.match(CLI_HELP, /--viewer away\|present/);
   assert.match(CLI_HELP, /configuration/i);
   assert.match(CLI_HELP, /ego-browser/);
 });

@@ -40,6 +40,10 @@ Commands:
   ego-browser --doctor         ensure host and print diagnostics
   ego-browser --reload         apply current effective host configuration
                               (restart Chromium if launch fields change; otherwise reconnect CDP)
+  ego-browser --viewer away|present
+                              tell the host whether someone watches the desktop;
+                              while away and agents are idle, browser windows are
+                              minimized so Chromium stops rendering (headed only)
 `;
 
 export type RunCliOptions = {
@@ -66,6 +70,8 @@ export type CliFlags = {
   help: boolean;
   doctor: boolean;
   reload: boolean;
+  /** `--viewer away|present`; "invalid" when the value is missing or unknown. */
+  viewer?: "away" | "present" | "invalid";
   remaining: string[];
 };
 
@@ -89,6 +95,16 @@ export function parseCliFlags(argv: string[]): CliFlags {
   }
   if (head === "--reload") {
     return { help: false, doctor: false, reload: true, remaining: [] };
+  }
+  if (head === "--viewer") {
+    const value = stripped[1];
+    return {
+      help: false,
+      doctor: false,
+      reload: false,
+      viewer: value === "away" || value === "present" ? value : "invalid",
+      remaining: [],
+    };
   }
   return {
     help: false,
@@ -391,6 +407,24 @@ async function runCliInner(
     try {
       await conn.request("reload", { config });
       writeStream(stdout, "browser connection reset on next call\n");
+      return 0;
+    } finally {
+      conn.close();
+    }
+  }
+
+  if (flags.viewer) {
+    if (flags.viewer === "invalid") {
+      writeStream(stderr, "usage: ego-browser --viewer away|present\n");
+      return 2;
+    }
+    await ensure(config, { env, packageRoot });
+    const conn = await connectWithRetry(connect, config.hostSocket);
+    try {
+      const status = await conn.request("viewer", {
+        present: flags.viewer === "present",
+      });
+      writeStream(stdout, JSON.stringify(status) + "\n");
       return 0;
     } finally {
       conn.close();
