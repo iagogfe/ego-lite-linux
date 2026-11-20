@@ -48,16 +48,22 @@ Optional flags:
 ```bash
 bash skills/ego-browser/scripts/install-linux.sh --no-doctor
 bash skills/ego-browser/scripts/install-linux.sh --doctor   # default
+bash skills/ego-browser/scripts/install-linux.sh --seed-chrome
 ```
 
-### Optional profile seed (`--seed-chrome`) — risky, off by default
+### Optional profile seed (`--seed-chrome`) — off by default
 
-Copying cookies/logins from your **system Chrome** into the ego profile is **not** done by default and is not wired into the installer yet.
+Copying cookies/logins from your **system Chrome** is **not** done by default:
 
-- A future installer `--seed-chrome` would copy only selected Default-profile dirs **when the source Chrome is fully closed**.
-- Seeding while Chrome is running (or blindly copying a live profile) can **corrupt Chrome data**. Leave seeding disabled unless you understand that risk.
+```bash
+bash skills/ego-browser/scripts/install-linux.sh --seed-chrome
+bash skills/ego-browser/scripts/seed-chrome-profile.sh --from ~/.config/chromium --reload
+```
 
-Until an explicit, guarded implementation lands, use Chrome’s own export/import or sign in again inside the ego profile.
+- Only login-state files are copied: `Local State`, `Default/Cookies`, `Default/Preferences`, `Default/Login Data`.
+- The source is read through `sqlite3 .backup`, producing a consistent snapshot **without copying a live profile file**, so Chrome may stay open. Cookie values are never printed.
+- The target is backed up (`Cookies.bak-<timestamp>`) and replaced atomically. If the host is running, pass `--reload` (or restart it) so it picks up the new cookies.
+- Sites signed in at seed time work immediately; anything signed in later in Chrome needs another seed run.
 
 ### Headed vs headless (WSL notes)
 

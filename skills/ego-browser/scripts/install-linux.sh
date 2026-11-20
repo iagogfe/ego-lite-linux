@@ -22,6 +22,8 @@ CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/ego-lite"
 SHIM_TARGET="$EGO_LINUX_HOST_PKG/bin/ego-browser.mjs"
 SHIM_LINK="$BIN_DIR/ego-browser"
 RUN_DOCTOR=1
+SEED_CHROME=0
+SEED_FROM=""
 
 log() {
   printf '%s\n' "$*" >&2
@@ -38,13 +40,15 @@ require_command() {
 
 usage() {
   cat >&2 <<'EOF'
-Usage: install-linux.sh [--doctor|--no-doctor] [-h|--help]
+Usage: install-linux.sh [--doctor|--no-doctor] [--seed-chrome] [--seed-from DIR] [-h|--help]
 
   Install the ego-shaped Linux host for ego-browser (not the Citro macOS app).
 
-  --doctor      Run `ego-browser --doctor` after install (default)
-  --no-doctor   Skip the doctor smoke check
-  -h, --help    Show this help
+  --doctor        Run `ego-browser --doctor` after install (default)
+  --no-doctor     Skip the doctor smoke check
+  --seed-chrome   Copy system Chrome login state into the host profile
+  --seed-from DIR Chrome profile root for --seed-chrome (default: auto-detect)
+  -h, --help      Show this help
 EOF
 }
 
@@ -58,6 +62,16 @@ parse_args() {
       --no-doctor)
         RUN_DOCTOR=0
         shift
+        ;;
+      --seed-chrome)
+        SEED_CHROME=1
+        shift
+        ;;
+      --seed-from)
+        [ "$#" -ge 2 ] || die "--seed-from needs a value"
+        SEED_FROM="$2"
+        SEED_CHROME=1
+        shift 2
         ;;
       -h | --help)
         usage
@@ -206,6 +220,20 @@ EOF
   esac
 }
 
+seed_chrome_profile() {
+  if [ "$SEED_CHROME" -eq 0 ]; then
+    log "Skipping Chrome profile seed (--seed-chrome not set)"
+    return 0
+  fi
+
+  log "Seeding login state from system Chrome ..."
+  if [ -n "$SEED_FROM" ]; then
+    bash "$REPO_ROOT/skills/ego-browser/scripts/seed-chrome-profile.sh" --from "$SEED_FROM" || log "warning: Chrome profile seed failed"
+  else
+    bash "$REPO_ROOT/skills/ego-browser/scripts/seed-chrome-profile.sh" || log "warning: Chrome profile seed failed"
+  fi
+}
+
 run_doctor() {
   if [ "$RUN_DOCTOR" -eq 0 ]; then
     log "Skipping ego-browser --doctor (--no-doctor)"
@@ -227,6 +255,7 @@ main() {
   require_node22
   build_packages
   create_dirs_and_symlink
+  seed_chrome_profile
   detect_chrome
   check_path
   run_doctor
